@@ -11,6 +11,7 @@ import android.view.inputmethod.EditorInfo
 import android.inputmethodservice.InputMethodService
 import android.widget.Button
 import android.widget.HorizontalScrollView
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.ikegami.transformerime.conversion.CandidateGenerator
@@ -66,8 +67,8 @@ class TransformerImeService : InputMethodService() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(4.dp(), 0, 4.dp(), 0)
         }
-        scroll.addView(candidateRow, HorizontalScrollView.LayoutParams(
-            HorizontalScrollView.LayoutParams.WRAP_CONTENT,
+        scroll.addView(candidateRow, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
             50.dp()
         ))
         root.addView(scroll, LinearLayout.LayoutParams(
