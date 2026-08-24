@@ -1,5 +1,6 @@
 package com.ikegami.transformerime.audio
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -8,21 +9,18 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioRecord
 import android.media.AudioPlaybackCaptureConfiguration
+import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
-import androidx.annotation.RequiresApi
-import android.app.Notification
+import android.os.Looper
 import java.util.concurrent.Executors
 import kotlin.math.sqrt
 
-/**
- * Captures capturable system playback audio and publishes only a normalized pulse level (0..1)
- * through SharedPreferences. Raw PCM is never stored or transmitted.
- */
+/** Captures capturable system playback and publishes only a normalized 0..1 pulse level. */
 class AudioPulseService : Service() {
     private val executor = Executors.newSingleThreadExecutor()
     @Volatile private var running = false
@@ -33,7 +31,7 @@ class AudioPulseService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            stopCapture()
+            stopCapture(stopProjection = true)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -77,10 +75,11 @@ class AudioPulseService : Service() {
         projection = mediaProjection
         mediaProjection.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
-                stopCapture()
+                projection = null
+                stopCapture(stopProjection = false)
                 stopSelf()
             }
-        }, null)
+        }, Handler(Looper.getMainLooper()))
 
         val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
@@ -125,18 +124,19 @@ class AudioPulseService : Service() {
         }
     }
 
-    private fun stopCapture() {
+    private fun stopCapture(stopProjection: Boolean) {
         running = false
         prefs().edit().putFloat(KEY_LEVEL, 0f).putBoolean(KEY_ACTIVE, false).apply()
         runCatching { audioRecord?.stop() }
         runCatching { audioRecord?.release() }
         audioRecord = null
-        runCatching { projection?.stop() }
+        val activeProjection = projection
         projection = null
+        if (stopProjection) runCatching { activeProjection?.stop() }
     }
 
     override fun onDestroy() {
-        stopCapture()
+        stopCapture(stopProjection = true)
         executor.shutdownNow()
         super.onDestroy()
     }
