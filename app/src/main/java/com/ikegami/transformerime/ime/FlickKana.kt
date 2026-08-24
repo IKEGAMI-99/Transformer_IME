@@ -27,7 +27,6 @@ object FlickKana {
         "な" to FlickSet("な", "に", "ぬ", "ね", "の"),
         "は" to FlickSet("は", "ひ", "ふ", "へ", "ほ"),
         "ま" to FlickSet("ま", "み", "む", "め", "も"),
-        // Gboard-like ya layout: up=ゆ, down=よ; brackets remain on left/right.
         "や" to FlickSet("や", "「", "ゆ", "」", "よ"),
         "ら" to FlickSet("ら", "り", "る", "れ", "ろ"),
         "わ" to FlickSet("わ", "を", "ん", "ー", "〜"),
@@ -37,7 +36,10 @@ object FlickKana {
     fun output(label: String, direction: FlickDirection): String =
         keys[label]?.value(direction).orEmpty()
 
-    /** Cycles the last kana through dakuten / handakuten / small-kana variants. */
+    /**
+     * Small kana takes priority when it exists, then dakuten / handakuten.
+     * Examples: つ -> っ -> づ -> つ, う -> ぅ -> ゔ -> う.
+     */
     fun modifyLast(text: String): String {
         if (text.isEmpty()) return text
         val last = text.last()
@@ -53,11 +55,11 @@ object FlickKana {
         charArrayOf('け', 'げ'), charArrayOf('こ', 'ご'),
         charArrayOf('さ', 'ざ'), charArrayOf('し', 'じ'), charArrayOf('す', 'ず'),
         charArrayOf('せ', 'ぜ'), charArrayOf('そ', 'ぞ'),
-        charArrayOf('た', 'だ'), charArrayOf('ち', 'ぢ'), charArrayOf('つ', 'づ', 'っ'),
+        charArrayOf('た', 'だ'), charArrayOf('ち', 'ぢ'), charArrayOf('つ', 'っ', 'づ'),
         charArrayOf('て', 'で'), charArrayOf('と', 'ど'),
         charArrayOf('は', 'ば', 'ぱ'), charArrayOf('ひ', 'び', 'ぴ'), charArrayOf('ふ', 'ぶ', 'ぷ'),
         charArrayOf('へ', 'べ', 'ぺ'), charArrayOf('ほ', 'ぼ', 'ぽ'),
-        charArrayOf('あ', 'ぁ'), charArrayOf('い', 'ぃ'), charArrayOf('う', 'ゔ', 'ぅ'),
+        charArrayOf('あ', 'ぁ'), charArrayOf('い', 'ぃ'), charArrayOf('う', 'ぅ', 'ゔ'),
         charArrayOf('え', 'ぇ'), charArrayOf('お', 'ぉ'),
         charArrayOf('や', 'ゃ'), charArrayOf('ゆ', 'ゅ'), charArrayOf('よ', 'ょ'),
         charArrayOf('わ', 'ゎ')

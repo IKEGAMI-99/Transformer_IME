@@ -103,14 +103,14 @@ jobs:
           db.close()
           PY
 
-      - name: Restore trained Japanese model
+      - name: Restore trained Japanese 21M model
         id: model-cache
         uses: actions/cache@v4
         with:
           path: |
             app/src/main/assets/medium_moe_jpn.q8
             app/src/main/assets/medium_moe_jpn.meta.json
-          key: jp-medium-moe-v3-${{ hashFiles('tools/train_medium_moe_japanese.py') }}
+          key: jp-large-moe-v7-${{ hashFiles('tools/train_large_moe_japanese.py', 'tools/train_medium_moe_japanese.py') }}
 
       - name: Install CPU PyTorch
         if: steps.model-cache.outputs.cache-hit != 'true'
@@ -119,29 +119,32 @@ jobs:
           python -m pip install numpy
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Train 5M Japanese MoE
+      - name: Train 21M Japanese MoE
         if: steps.model-cache.outputs.cache-hit != 'true'
         run: |
-          python tools/train_medium_moe_japanese.py \
+          python tools/train_large_moe_japanese.py \
             --output app/src/main/assets/medium_moe_jpn.q8 \
             --metadata app/src/main/assets/medium_moe_jpn.meta.json \
-            --steps 1800 \
-            --max-sentences 80000 \
-            --batch-size 24
+            --steps 3000 \
+            --max-sentences 180000 \
+            --batch-size 16 \
+            --lr 0.0003
 
-      - name: Verify Japanese model asset
+      - name: Verify Japanese 21M model asset
         run: |
           python - <<'PY'
           from pathlib import Path
           import json
           model = Path('app/src/main/assets/medium_moe_jpn.q8')
           meta = Path('app/src/main/assets/medium_moe_jpn.meta.json')
-          assert model.exists() and model.stat().st_size > 5_000_000
+          assert model.exists() and model.stat().st_size > 20_000_000
           assert model.read_bytes()[:4] == b'MMJQ'
           info = json.loads(meta.read_text(encoding='utf-8'))
-          assert info['parameter_count'] >= 5_000_000
+          assert info['parameter_count'] >= 20_000_000, info
+          assert info['architecture']['vocab_hash_buckets'] == 4096, info
+          assert info['architecture']['context'] == 48, info
           assert info['training']['corpus'].startswith('Tatoeba')
-          print('Japanese model verified:', info['parameter_count'], 'params,', model.stat().st_size, 'bytes')
+          print('Japanese 21M model verified:', info['parameter_count'], 'params,', model.stat().st_size, 'bytes')
           PY
 
       - uses: actions/setup-java@v4
@@ -167,13 +170,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.6.0-debug
+          name: Transformer-IME-v0.7.0-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.6 metadata
+      - name: Upload v0.7 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.6.0-metadata
+          name: Transformer-IME-v0.7.0-metadata
           path: |
             app/src/main/assets/medium_moe_jpn.meta.json
             app/src/main/assets/mozc_compact.meta.json
