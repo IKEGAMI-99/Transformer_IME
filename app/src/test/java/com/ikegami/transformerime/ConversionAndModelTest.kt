@@ -73,6 +73,19 @@ class ConversionAndModelTest {
     }
 
     @Test
+    fun threeAiSlotsSurviveDuplicateNeuralBranches() {
+        val slots = Zenzai190MEngine.fillAiSlots(
+            neural = listOf("新宿駅", "新宿駅"),
+            drafts = listOf("新宿駅", "新宿", "新宿駅前", "しんじゅくえき"),
+            count = 3
+        )
+        assertEquals(3, slots.size)
+        assertEquals(3, slots.distinct().size)
+        assertEquals("新宿駅", slots.first())
+        assertTrue(slots.contains("新宿"))
+    }
+
+    @Test
     fun speculativeMergeUsesClassicalDraftAndNeuralConstraint() {
         val drafts = listOf("新宿駅", "新宿液", "新宿", "しんじゅくえき")
 

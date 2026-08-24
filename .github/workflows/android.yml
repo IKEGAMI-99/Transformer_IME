@@ -123,8 +123,8 @@ jobs:
               ('fallback', Path('app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf'), '95.1M', 'CC BY-SA 4.0'),
           ]
           result = {
-              'version': '0.8.1',
-              'design': 'Zenzai top-branch 3-way conversion + multi-reading next prediction',
+              'version': '0.8.2',
+              'design': 'Zenzai over-branch + guaranteed 3 visible AI-assisted slots',
               'estimated_total_parameters': 190_200_000,
               'quantization': 'Q5_K_M',
               'models': []
@@ -160,7 +160,6 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          # Zenzai v3: context tag + Katakana reading + output tag.
           Path('/tmp/zenz_prompt.txt').write_text('\uee02東京へ行く。\uee00シンジュクエキ\uee01', encoding='utf-8')
           PY
           set +e
@@ -173,11 +172,14 @@ jobs:
           test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
-      - name: Verify v0.8.1 multi-candidate sources
+      - name: Verify v0.8.2 three visible AI slots
         run: |
           grep -q 'nativeGenerateCandidates' app/src/main/cpp/zenz_jni.cpp
           grep -q 'AI_CONVERSION_COUNT = 3' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
-          grep -q 'NEXT_PRIMARY_BRANCHES = 4' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
+          grep -q 'CONVERSION_BRANCHES = 5' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
+          grep -q 'NEXT_PRIMARY_BRANCHES = 5' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
+          grep -q '✦AI1' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
+          grep -q 'aiCount = if (medium.corpusTrained) 3 else 1' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
 
       - uses: actions/setup-java@v4
         with:
@@ -219,13 +221,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.8.1-Zenzai190M-MultiAI-debug
+          name: Transformer-IME-v0.8.2-Zenzai190M-AI3-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.8.1 metadata
+      - name: Upload v0.8.2 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.8.1-metadata
+          name: Transformer-IME-v0.8.2-metadata
           path: |
             app/src/main/assets/zenzai190.meta.json
             app/src/main/assets/mozc_compact.meta.json
