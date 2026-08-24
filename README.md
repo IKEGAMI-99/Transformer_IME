@@ -4,13 +4,13 @@ Android向けの、**完全オンデバイスAI日本語IME**実験プロジェ�
 
 Mozc OSS辞書による高速なかな漢字変換を土台に、Zenzai v3.2-smallによるニューラル変換・文脈予測、端末内SQLiteを使ったPersonal RAG / 個人学習、英語入力予測、Audio Pulse UIを組み合わせています。
 
-**現在のバージョン: v0.10.1**
+**現在のバージョン: v0.10.2**
 
 ## APKダウンロード
 
-### v0.10.1
+### v0.10.2
 
-[📱 Transformer IME v0.10.1 APKをダウンロード](https://github.com/IKEGAMI-99/Transformer_IME/actions/runs/32723081255/artifacts/9518564129)
+[📱 Transformer IME v0.10.2 APKをダウンロード](https://github.com/IKEGAMI-99/Transformer_IME/actions/runs/32726227402/artifacts/9519707673)
 
 GitHub ActionsでZenzai実変換、source verification、unit test、Android NDK、APK生成まで検証済みのdebug APKです。
 
@@ -35,21 +35,140 @@ GitHub Actions artifactには保存期限があります。期限切れの場合
 - 絵文字パネル + 最近使った絵文字
 - `123` から**4×4数字キーパッド**へ切替
 - Backspace長押し連続削除
-- **Audio Pulse**: システム再生音に合わせてキー領域の背景が鼓動
-- 音量に応じて背景色が変化
+- **Audio Pulse**: 無音時は黒、音が入るとキー領域の下端から光が立ち上がる
+- 音量に応じて青 / シアン → 紫 → ピンク → オレンジへ変化
+- 通常キー面は透明で、背景グローを直接表示
 - パスワード欄ではAI・個人学習を停止
 - `INTERNET` permissionなし
 - 推論・学習・変換は端末内で完結
 
 ---
 
-## v0.10.1
+## v0.10.2
 
-v0.10.1は実機フィードバックをもとに、数字UIとAudio Pulseを作り直したバージョンです。
+v0.10.2は実機フィードバックをもとに、Audio Pulseのレイアウトと描画方式をもう一段作り直したバージョンです。
 
-### 数字キーパッド
+### Pulse領域を縮小
 
-v0.10.0の扇状数字ポップアップは廃止しました。
+v0.10.1ではPulse背景Viewがキー領域より大きく測定される端末があり、IME下側に大きな発光領域ができることがありました。
+
+v0.10.2ではPulse背景を**最大320dpのキー領域**に制限しています。
+
+```text
+候補バー
+────────────
+キー領域       ← Audio Pulseはここだけ
+キー領域
+キー領域
+ナビゲーション
+```
+
+発光Viewが画面下部全体へ伸びないようにしています。
+
+### 無音時は黒
+
+Audio Pulseが有効でも、入力音量がしきい値以下なら背景は完全な黒です。
+
+```text
+silence
+  ↓
+noise gate
+  ↓
+energy = 0
+  ↓
+BLACK
+```
+
+通常キーの黒い塗りも撤去し、キー面はほぼ透明です。
+
+そのため、無音時は黒いキーボード、音が入った時だけ背景の光がキー越しに見える構成になっています。
+
+---
+
+## Bottom Glow Audio Pulse
+
+Audio PulseはAndroidの `AudioPlaybackCapture` で取得可能なシステム再生音を解析し、キー領域の**下端を光源**として発光します。
+
+```text
+システム再生音
+      ↓
+AudioPlaybackCapture
+      ↓
+PCM 16bit
+      ↓
+RMS → dB scale
++ instantaneous peak
+      ↓
+noise gate
+      ↓
+fast attack / slower decay
+      ↓
+bottom-up LinearGradient
++ bottom-center RadialGradient
+```
+
+### 音量スケーリング
+
+v0.10.1の単純なRMS倍率では大きめの音で値が飽和しやすかったため、v0.10.2では**dBベース**に変更しました。
+
+小さい音と大きい音の差を残しやすくし、普通の音量ですぐオレンジまで到達しないようにしています。
+
+### 下から立ち上がるグラデーション
+
+背景全体を単色で塗るのではなく、音量に応じて発光の高さが変わります。
+
+```text
+静音      █ 黒
+小音量    █
+          ░ 青
+          ▓ シアン
+
+中音量    ░
+          ▒ 紫
+          ▓ ピンク
+
+大音量    ░
+          ▒ ピンク
+          █ オレンジ / 白いピーク
+          ↑ 下端光源
+```
+
+LinearGradientに加えて、画面下側の外に光源があるように見せるRadialGradientを重ねています。
+
+### 鼓動
+
+RMSだけでなく瞬間ピークも監視しています。
+
+急激な音量上昇ではbeat envelopeを生成して、短時間だけ発光を強くし、その後少しゆっくり減衰します。
+
+色変化:
+
+```text
+小音量   青 / シアン
+   ↓
+中音量   紫 / バイオレット
+   ↓
+大音量   ピンク / マゼンタ
+   ↓
+ピーク   オレンジ寄り
+```
+
+音声そのものは保存しません。
+
+### Audio Pulseの有効化
+
+1. Transformer IMEアプリ本体を開く
+2. `Audio Pulse 背景` をON
+3. `RECORD_AUDIO` を許可
+4. Androidの画面 / 音声キャプチャ確認を許可
+
+再生アプリ側がAudioPlaybackCaptureを禁止している場合、そのアプリの音には反応しません。
+
+---
+
+## 数字キーパッド
+
+v0.10.0の扇状数字ポップアップは廃止済みです。
 
 日本語フリック右側の `123` を押すと、そのまま独立した4×4数字キーパッドへ切り替わります。
 
@@ -63,55 +182,6 @@ v0.10.0の扇状数字ポップアップは廃止しました。
 `かな` で日本語フリックへ戻ります。
 
 Backspaceは数字レイヤーでも長押し連続削除に対応します。
-
----
-
-## Audio Pulse v0.10.1
-
-Audio PulseはAndroidの `AudioPlaybackCapture` で取得可能なシステム再生音を解析し、**キーボードのキー領域だけ**を音に合わせて発光させます。
-
-v0.10.0ではIME全体の背景にエフェクトを置いていましたが、v0.10.1では候補バーより下のキーボード領域専用レイヤーへ変更しています。
-
-```text
-システム再生音
-      ↓
-AudioPlaybackCapture
-      ↓
-PCM 16bit
-      ↓
-RMS + instantaneous peak
-      ↓
-fast attack / slower decay envelope
-      ↓
-keyboard-only pulse background
-```
-
-### 色変化
-
-音量に合わせて背景色が連続的に変化します。
-
-```text
-小音量   青 / シアン
-   ↓
-中音量   紫 / バイオレット
-   ↓
-大音量   ピンク / マゼンタ
-   ↓
-ピーク   オレンジ寄り
-```
-
-音量の急な立ち上がりを検出すると短いbeat envelopeを作り、グロー半径と明るさを瞬間的に大きくして、その後ゆっくり減衰させます。
-
-音声そのものは保存しません。
-
-### Audio Pulseの有効化
-
-1. Transformer IMEアプリ本体を開く
-2. `Audio Pulse 背景` をON
-3. `RECORD_AUDIO` を許可
-4. Androidの画面 / 音声キャプチャ確認を許可
-
-再生アプリ側がAudioPlaybackCaptureを禁止している場合、そのアプリの音には反応しません。
 
 ---
 
@@ -264,19 +334,32 @@ CIでは以下を自動検証します。
 4. azooKey llama.cpp host build
 5. Zenzai実かな漢字変換 smoke test
 6. Zenzai 95M ×10構成
-7. 扇状数字UIが削除されていること
-8. 4×4数字キーパッドのsource verification
-9. keyboard-only Audio Pulse実装
-10. RMS + instantaneous peak処理
-11. Audio Pulseの色変化実装
-12. Kotlin unit tests
-13. Android NDK / arm64 build
-14. APK内の単一GGUF + `libzenzjni.so`
-15. APK artifact upload
+7. 4×4数字キーパッド
+8. Pulse背景の320dp制限
+9. 通常キーが透明であること
+10. Bottom-up LinearGradient / RadialGradient
+11. Audio PulseのdBベースRMS処理
+12. silence gate
+13. instantaneous peak / beat envelope
+14. Kotlin unit tests
+15. Android NDK / arm64 build
+16. APK内の単一GGUF + `libzenzjni.so`
+17. APK artifact upload
 
 ---
 
 ## バージョン履歴
+
+### v0.10.2
+
+- Audio Pulse背景を最大320dpへ制限
+- 無音時を完全な黒へ
+- 通常キー面を透明化
+- 下端光源のLinearGradient + RadialGradient
+- RMSのdBスケーリング
+- silence gate追加
+- 音量色変化のダイナミックレンジ改善
+- Zenzai 95M ×10 / Personal RAGは維持
 
 ### v0.10.1
 
