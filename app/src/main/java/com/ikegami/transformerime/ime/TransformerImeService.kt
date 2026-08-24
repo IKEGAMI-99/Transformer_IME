@@ -433,8 +433,11 @@ class TransformerImeService : InputMethodService() {
         val base = CandidateGenerator.candidates(reading)
         val personalized = if (!secureField) learningStore?.rankConversions(reading, base) ?: base else base
         val tinyRanked = if (aiActive()) model?.rankCandidates(compositionContext, personalized) ?: personalized else personalized
-        currentCandidates = tinyRanked
-        showCandidates(tinyRanked, if (aiActive() && tinyRanked.isNotEmpty()) "✦" else null) { commitCandidate(it) }
+        val visible = if (aiActive() && tinyRanked.isNotEmpty()) {
+            forceRawReadingSecond(tinyRanked.first(), reading, tinyRanked.drop(1))
+        } else personalized
+        currentCandidates = visible
+        showCandidates(visible, if (aiActive() && visible.isNotEmpty()) "✦" else null, aiSlots = setOf(0)) { commitCandidate(it) }
         scheduleMediumRerank(reading, tinyRanked)
     }
 
@@ -450,21 +453,32 @@ class TransformerImeService : InputMethodService() {
             if (epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@Runnable
             inferenceExecutor.execute {
                 val result = runCatching { medium.rerank(contextSnapshot, reading, candidatesSnapshot) }.getOrNull() ?: return@execute
+                val rawSecond = if (result.candidates.isNotEmpty()) {
+                    forceRawReadingSecond(result.candidates.first(), reading, result.candidates.drop(1))
+                } else result.candidates
                 mainHandler.post {
                     if (epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@post
-                    currentCandidates = result.candidates
-                    val modelTag = if (medium.corpusTrained) "✦Z95" else "✦Tiny"
+                    currentCandidates = rawSecond
+                    val modelTag = if (medium.corpusTrained) "✦Z95×10" else "✦Tiny"
                     val dictionaryTag = if (CandidateGenerator.extendedDictionaryReady) "·D" else ""
                     showCandidates(
-                        result.candidates,
+                        rawSecond,
                         "$modelTag$dictionaryTag ${result.latencyMs}ms",
-                        aiSlots = if (medium.corpusTrained) setOf(0, 2, 3) else setOf(0)
+                        aiSlots = setOf(0)
                     ) { commitCandidate(it) }
                 }
             }
         }
         pendingMediumRerank = runnable
         mainHandler.postDelayed(runnable, 80L)
+    }
+
+    private fun forceRawReadingSecond(aiCandidate: String, reading: String, rest: List<String>): List<String> = buildList {
+        add(aiCandidate)
+        add(reading)
+        rest.forEach { candidate ->
+            if (candidate != aiCandidate && candidate != reading) add(candidate)
+        }
     }
 
     private fun cancelPendingRerank(incrementEpoch: Boolean = true) {
@@ -577,7 +591,7 @@ class TransformerImeService : InputMethodService() {
         }
 
         currentCandidates = pool
-        showCandidates(pool.take(8), "✦次") { commitPrediction(it) }
+        showCandidates(pool.take(8), "✦次", aiSlots = setOf(0)) { commitPrediction(it) }
         scheduleMediumNextPrediction(context, pool)
     }
 
@@ -593,21 +607,17 @@ class TransformerImeService : InputMethodService() {
             inferenceExecutor.execute {
                 val result = runCatching { medium.rerank(contextTail, "", pool) }.getOrNull() ?: return@execute
                 val personalized = if (!secureField) {
-                    val firstAi = result.candidates.take(3)
-                    val rest = result.candidates.drop(3)
-                    val rankedAi = learningStore?.rankNext(contextTail, firstAi) ?: firstAi
-                    val rankedRest = learningStore?.rankNext(contextTail, rest) ?: rest
-                    (rankedAi + rankedRest).distinct()
+                    learningStore?.rankNext(contextTail, result.candidates) ?: result.candidates
                 } else result.candidates
                 mainHandler.post {
                     if (epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@post
                     if (textBeforeCursor().takeLast(180) != contextTail) return@post
                     currentCandidates = personalized
-                    val modelTag = if (medium.corpusTrained) "✦次Z95" else "✦次Tiny"
+                    val modelTag = if (medium.corpusTrained) "✦次Z95×10" else "✦次Tiny"
                     showCandidates(
                         personalized.take(10),
                         "$modelTag ${result.latencyMs}ms",
-                        aiSlots = if (medium.corpusTrained) setOf(0, 1, 2) else setOf(0)
+                        aiSlots = setOf(0)
                     ) { commitPrediction(it) }
                 }
             }
