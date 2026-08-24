@@ -7,6 +7,7 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.RadialGradient
 import android.graphics.Shader
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
 import android.os.Handler
@@ -18,6 +19,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
+import android.view.animation.LinearInterpolator
 import android.view.inputmethod.EditorInfo
 import android.inputmethodservice.InputMethodService
 import android.widget.Button
@@ -27,7 +29,6 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import com.ikegami.transformerime.audio.AudioPulseService
 import com.ikegami.transformerime.audio.AudioPulseState
 import com.ikegami.transformerime.conversion.CandidateGenerator
 import com.ikegami.transformerime.conversion.EnglishPredictor
@@ -47,6 +48,7 @@ class TransformerImeService : InputMethodService() {
     private var candidateRow: LinearLayout? = null
     private var keyboardContainer: LinearLayout? = null
     private var pulseBackground: AudioPulseBackgroundView? = null
+    private var commentOverlay: FrameLayout? = null
     private var japaneseMode = true
     private var englishShift = false
     private var secureField = false
@@ -57,6 +59,7 @@ class TransformerImeService : InputMethodService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val inferenceExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var mediumModel: MediumMoETransformer? = null
+    @Volatile private var serviceAlive = true
     private var pendingMediumRerank: Runnable? = null
     private var pendingNextPrediction: Runnable? = null
     private var deleteRepeat: Runnable? = null
@@ -64,9 +67,11 @@ class TransformerImeService : InputMethodService() {
     private var predictionEpoch = 0
     private var currentReading = ""
     private var currentCandidates: List<String> = emptyList()
+    private var commentLane = 0
 
     private val pulseRunnable = object : Runnable {
         override fun run() {
+            if (!serviceAlive) return
             val enabled = AudioPulseState.active
             val level = if (enabled) AudioPulseState.level else 0f
             pulseBackground?.setPulse(level, enabled)
@@ -78,22 +83,31 @@ class TransformerImeService : InputMethodService() {
 
     override fun onCreate() {
         super.onCreate()
+        serviceAlive = true
         model = ModelRepository.get(this)
         learningStore = UserLearningStore(this)
-        inferenceExecutor.execute {
+        submitInference {
             CandidateGenerator.initialize(this)
-            mediumModel = runCatching { MediumMoETransformer.load(this) }.getOrNull()
+            mediumModel = runCatching { MediumMoETransformer.load(applicationContext) }.getOrNull()
         }
     }
 
     override fun onDestroy() {
+        serviceAlive = false
         cancelPendingRerank()
         cancelPendingNextPrediction()
         stopDeleteRepeat()
         mainHandler.removeCallbacks(pulseRunnable)
-        runCatching { mediumModel?.close() }
+        clearCommentOverlay()
+        pulseBackground = null
+        keyboardContainer = null
+        candidateRow = null
+        mediumModel = null
         runCatching { learningStore?.close() }
-        inferenceExecutor.shutdownNow()
+        learningStore = null
+        // Let an already-running llama.cpp call unwind naturally. Interrupting it while an
+        // InputMethodService is being torn down was a likely source of native instability.
+        inferenceExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -126,9 +140,37 @@ class TransformerImeService : InputMethodService() {
         super.onFinishInput()
     }
 
+    override fun onFinishInputView(finishingInput: Boolean) {
+        mainHandler.removeCallbacks(pulseRunnable)
+        clearCommentOverlay()
+        pulseBackground = null
+        commentOverlay = null
+        keyboardContainer = null
+        candidateRow = null
+        super.onFinishInputView(finishingInput)
+    }
+
+    private fun submitInference(block: () -> Unit) {
+        if (!serviceAlive || inferenceExecutor.isShutdown) return
+        runCatching {
+            inferenceExecutor.execute {
+                if (serviceAlive) block()
+            }
+        }
+    }
+
     override fun onCreateInputView(): View {
-        val minimumBottomSafe = 8.dp()
-        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        val minimumBottomSafe = 18.dp()
+        runCatching {
+            window?.window?.navigationBarColor = Color.BLACK
+            window?.window?.isNavigationBarContrastEnforced = false
+        }
+
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            clipChildren = false
+            clipToPadding = false
+        }
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -155,17 +197,11 @@ class TransformerImeService : InputMethodService() {
         candidateHost.addView(scroll, LinearLayout.LayoutParams(0, 50.dp(), 1f))
         content.addView(candidateHost, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 50.dp()))
 
-        val keyboardHost = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
-        }
+        val keyboardHost = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         pulseBackground = AudioPulseBackgroundView(this)
         keyboardHost.addView(
             pulseBackground,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                1.dp(),
-                Gravity.BOTTOM
-            )
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 1.dp(), Gravity.BOTTOM)
         )
 
         keyboardContainer = LinearLayout(this).apply {
@@ -174,7 +210,10 @@ class TransformerImeService : InputMethodService() {
             setBackgroundColor(Color.TRANSPARENT)
             setOnApplyWindowInsetsListener { view, insets ->
                 val nav = insets.getInsets(WindowInsets.Type.navigationBars())
-                view.setPadding(0, 0, 0, maxOf(minimumBottomSafe, nav.bottom))
+                // Some OEM IME windows report enormous gesture insets. Keep enough room for
+                // the real nav bar without recreating the giant black footer from v0.10.2.
+                val bottom = maxOf(minimumBottomSafe, nav.bottom.coerceAtMost(30.dp()))
+                view.setPadding(0, 0, 0, bottom)
                 insets
             }
             addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
@@ -198,6 +237,19 @@ class TransformerImeService : InputMethodService() {
         root.addView(
             content,
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
+        )
+
+        // Permission-free NicoNico-style comment lane. It lives inside the IME window so it
+        // never needs SYSTEM_ALERT_WINDOW and cannot destabilize unrelated app windows.
+        commentOverlay = FrameLayout(this).apply {
+            isClickable = false
+            isFocusable = false
+            clipChildren = false
+            clipToPadding = false
+        }
+        root.addView(
+            commentOverlay,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 50.dp(), Gravity.TOP)
         )
 
         renderKeyboard()
@@ -227,11 +279,11 @@ class TransformerImeService : InputMethodService() {
         row2.addView(numberMenuButton(), japaneseSideParams())
         root.addView(row2, japaneseRowParams())
 
-        addJapaneseRow(root, "記号", listOf("ま", "や", "ら"), functionButton("変換") { handleConversionKey() }, ::showSymbolCandidates)
+        addJapaneseRow(root, "記号", listOf("ま", "や", "ら"), functionButton("空白") { handleJapaneseSpace() }, ::showSymbolCandidates)
 
         val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(Color.TRANSPARENT) }
         bottom.addView(functionButton("あa1", pill = true) { toggleMode(false) }, japaneseSideParams())
-        bottom.addView(functionButton("゛゜\n大小") { handleKanaModifier() }, japaneseCenterParams())
+        bottom.addView(kanaModifierFlickButton(), japaneseCenterParams())
         bottom.addView(flickButton("わ"), japaneseCenterParams())
         bottom.addView(flickButton("、。"), japaneseCenterParams())
         bottom.addView(functionButton("↵", accent = true) { handleEnter() }, japaneseSideParams())
@@ -258,22 +310,16 @@ class TransformerImeService : InputMethodService() {
         val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         header.addView(functionButton("← かな") { renderKeyboard() }, LinearLayout.LayoutParams(0, 48.dp(), 1f))
         header.addView(TextView(this).apply {
-            text = "絵文字"
-            textSize = 17f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
+            text = "絵文字"; textSize = 17f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
         }, LinearLayout.LayoutParams(0, 48.dp(), 2f))
         header.addView(deleteRepeatButton(), LinearLayout.LayoutParams(0, 48.dp(), 1f))
         root.addView(header)
 
-        val recent = emojiRecents()
-        val all = (recent + EMOJIS).distinct()
+        val all = (emojiRecents() + EMOJIS).distinct()
         val grid = GridLayout(this).apply { columnCount = 7; setPadding(6.dp(), 4.dp(), 6.dp(), 8.dp()) }
         all.forEach { emoji ->
             grid.addView(TextView(this).apply {
-                text = emoji
-                textSize = 28f
-                gravity = Gravity.CENTER
+                text = emoji; textSize = 28f; gravity = Gravity.CENTER
                 setOnClickListener {
                     currentInputConnection?.commitText(emoji, 1)
                     rememberEmoji(emoji)
@@ -284,7 +330,6 @@ class TransformerImeService : InputMethodService() {
         root.addView(ScrollView(this).apply { addView(grid) }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 192.dp()))
     }
 
-    /** Standard keypad layer. v0.10.1 intentionally removes the radial/fan popup. */
     private fun renderNumberPanel() {
         val root = keyboardContainer ?: return
         root.removeAllViews()
@@ -330,10 +375,7 @@ class TransformerImeService : InputMethodService() {
             cornerRadius = 12.dp().toFloat()
             setStroke(1.dp(), Color.argb(110, 78, 78, 90))
         }
-        setOnClickListener {
-            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            action()
-        }
+        setOnClickListener { performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); action() }
     }
 
     private fun emojiRecents(): List<String> = getSharedPreferences("transformer_ime", Context.MODE_PRIVATE)
@@ -382,6 +424,50 @@ class TransformerImeService : InputMethodService() {
         }
     }
 
+    private fun kanaModifierFlickButton(): Button {
+        var downX = 0f
+        var downY = 0f
+        val threshold = 20.dp().toFloat()
+        return darkButton("゛ 小 ゜", false).apply {
+            contentDescription = "中央 小文字切替、左 濁点、右 半濁点"
+            setOnClickListener { }
+            setOnTouchListener { view, event ->
+                fun direction(x: Float, y: Float): FlickDirection {
+                    val dx = x - downX
+                    val dy = y - downY
+                    if (abs(dx) < threshold && abs(dy) < threshold) return FlickDirection.CENTER
+                    return if (abs(dx) >= abs(dy)) {
+                        if (dx < 0) FlickDirection.LEFT else FlickDirection.RIGHT
+                    } else if (dy < 0) FlickDirection.UP else FlickDirection.DOWN
+                }
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> { downX = event.x; downY = event.y; isPressed = true; true }
+                    MotionEvent.ACTION_MOVE -> {
+                        text = when (direction(event.x, event.y)) {
+                            FlickDirection.LEFT -> "゛"
+                            FlickDirection.RIGHT -> "゜"
+                            else -> "小"
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        val dir = direction(event.x, event.y)
+                        text = "゛ 小 ゜"; isPressed = false; view.performClick()
+                        view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        when (dir) {
+                            FlickDirection.LEFT -> handleKanaModifier(ModifierAction.DAKUTEN)
+                            FlickDirection.RIGHT -> handleKanaModifier(ModifierAction.HANDAKUTEN)
+                            else -> handleKanaModifier(ModifierAction.CYCLE)
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> { text = "゛ 小 ゜"; isPressed = false; true }
+                    else -> true
+                }
+            }
+        }
+    }
+
     private fun functionButton(label: String, pill: Boolean = false, accent: Boolean = false, action: () -> Unit): Button =
         darkButton(label, false, pill, accent).apply {
             setOnClickListener { performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); action() }
@@ -392,9 +478,7 @@ class TransformerImeService : InputMethodService() {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    handleBackspace()
-                    startDeleteRepeat()
-                    true
+                    handleBackspace(); startDeleteRepeat(); true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { stopDeleteRepeat(); true }
                 else -> true
@@ -407,8 +491,8 @@ class TransformerImeService : InputMethodService() {
         var repeats = 0
         val runnable = object : Runnable {
             override fun run() {
-                handleBackspace()
-                repeats++
+                if (!serviceAlive) return
+                handleBackspace(); repeats++
                 mainHandler.postDelayed(this, if (repeats > 12) 32L else 58L)
             }
         }
@@ -423,7 +507,7 @@ class TransformerImeService : InputMethodService() {
 
     private fun darkButton(label: String, large: Boolean, pill: Boolean = false, accent: Boolean = false): Button = Button(this).apply {
         text = label
-        textSize = if (large) 26f else if (label.length > 3) 14f else 19f
+        textSize = if (large) 26f else if (label.length > 4) 13f else 19f
         setTextColor(Color.rgb(238, 238, 238))
         gravity = Gravity.CENTER
         isAllCaps = false
@@ -456,11 +540,18 @@ class TransformerImeService : InputMethodService() {
         refreshCompositionAndCandidates()
     }
 
-    private fun handleKanaModifier() {
+    private enum class ModifierAction { CYCLE, DAKUTEN, HANDAKUTEN }
+
+    private fun handleKanaModifier(action: ModifierAction) {
         if (compositionBuffer.isEmpty()) return
         cancelPendingNextPrediction(); cancelPendingRerank()
-        val modified = FlickKana.modifyLast(compositionBuffer.toString())
-        if (modified != compositionBuffer.toString()) {
+        val current = compositionBuffer.toString()
+        val modified = when (action) {
+            ModifierAction.CYCLE -> FlickKana.modifyLast(current)
+            ModifierAction.DAKUTEN -> FlickKana.applyDakuten(current)
+            ModifierAction.HANDAKUTEN -> FlickKana.applyHandakuten(current)
+        }
+        if (modified != current) {
             compositionBuffer.clear(); compositionBuffer.append(modified); refreshCompositionAndCandidates()
         }
     }
@@ -477,10 +568,11 @@ class TransformerImeService : InputMethodService() {
         showCandidates(symbols, null) { commitDirect(it) }
     }
 
-    private fun handleConversionKey() {
-        cancelPendingNextPrediction()
-        if (compositionBuffer.isNotEmpty()) commitCandidate(currentCandidates.firstOrNull() ?: currentReading)
-        else commitDirect(" ")
+    private fun handleJapaneseSpace() {
+        cancelPendingNextPrediction(); cancelPendingRerank()
+        if (compositionBuffer.isNotEmpty()) commitRawReading()
+        currentInputConnection?.commitText(" ", 1)
+        postNextPredictions()
     }
 
     // ------------------------------------------------------------
@@ -646,12 +738,12 @@ class TransformerImeService : InputMethodService() {
         val contextSnapshot = compositionContext
         val snapshot = candidates.toList()
         val runnable = Runnable {
-            if (epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@Runnable
-            inferenceExecutor.execute {
-                val result = runCatching { medium.rerank(contextSnapshot, reading, snapshot) }.getOrNull() ?: return@execute
+            if (!serviceAlive || epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@Runnable
+            submitInference {
+                val result = runCatching { medium.rerank(contextSnapshot, reading, snapshot) }.getOrNull() ?: return@submitInference
                 val rawSecond = if (result.candidates.isNotEmpty()) forceRawReadingSecond(result.candidates.first(), reading, result.candidates.drop(1)) else result.candidates
                 mainHandler.post {
-                    if (epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@post
+                    if (!serviceAlive || epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@post
                     currentCandidates = rawSecond
                     val dictionaryTag = if (CandidateGenerator.extendedDictionaryReady) "·D" else ""
                     val ragTag = if (ragUsed) "·R" else ""
@@ -694,16 +786,17 @@ class TransformerImeService : InputMethodService() {
         val contextTail = context.takeLast(180)
         val pool = candidates.toList()
         val runnable = Runnable {
-            if (epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@Runnable
-            inferenceExecutor.execute {
-                val result = runCatching { medium.rerank(contextTail, "", pool) }.getOrNull() ?: return@execute
-                val ai = result.candidates.firstOrNull()
-                val rest = result.candidates.drop(1)
-                val rankedRest = if (!secureField) learningStore?.rankNext(contextTail, rest) ?: rest else rest
-                val visible = (listOfNotNull(ai) + rankedRest).distinct()
+            if (!serviceAlive || epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@Runnable
+            submitInference {
+                val result = runCatching { medium.rerank(contextTail, "", pool) }.getOrNull() ?: return@submitInference
+                if (!serviceAlive) return@submitInference
                 mainHandler.post {
-                    if (epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@post
+                    if (!serviceAlive || epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@post
                     if (textBeforeCursor().takeLast(180) != contextTail) return@post
+                    val ai = result.candidates.firstOrNull()
+                    val rest = result.candidates.drop(1)
+                    val rankedRest = if (!secureField) learningStore?.rankNext(contextTail, rest) ?: rest else rest
+                    val visible = (listOfNotNull(ai) + rankedRest).distinct()
                     currentCandidates = visible
                     val ragTag = if (ragUsed) "·R" else ""
                     showCandidates(visible.take(10), "✦次Z95×10$ragTag ${result.latencyMs}ms", aiSlots = setOf(0)) { commitPrediction(it) }
@@ -734,6 +827,16 @@ class TransformerImeService : InputMethodService() {
             learningStore?.recordCommitted(context, prediction)
         }
         currentInputConnection?.commitText(prediction, 1)
+        postNextPredictions()
+    }
+
+    private fun commitRawReading() {
+        cancelPendingNextPrediction(); cancelPendingRerank()
+        val raw = compositionBuffer.toString()
+        if (raw.isBlank()) return
+        if (!secureField) learningStore?.recordCommitted(compositionContext, raw)
+        currentInputConnection?.commitText(raw, 1)
+        clearCompositionState()
         postNextPredictions()
     }
 
@@ -779,15 +882,23 @@ class TransformerImeService : InputMethodService() {
 
     private fun handleEnter() {
         cancelPendingNextPrediction(); cancelPendingRerank()
-        if (!japaneseMode && englishBuffer.isNotEmpty()) commitEnglishBuffer(false)
-        if (compositionBuffer.isNotEmpty()) { commitCandidate(currentCandidates.firstOrNull() ?: currentReading); return }
+        if (!japaneseMode && englishBuffer.isNotEmpty()) {
+            commitEnglishBuffer(false)
+            return
+        }
+        // Enter is explicit raw commit in Japanese composition. Only tapping a candidate
+        // performs kana-kanji conversion.
+        if (compositionBuffer.isNotEmpty()) {
+            commitRawReading()
+            return
+        }
         currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
         currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
         if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
     }
 
     private fun commitDirect(text: String) {
-        if (compositionBuffer.isNotEmpty()) commitCandidate(currentCandidates.firstOrNull() ?: currentReading)
+        if (compositionBuffer.isNotEmpty()) commitRawReading()
         if (englishBuffer.isNotEmpty()) commitEnglishBuffer(false)
         currentInputConnection?.commitText(text, 1)
         if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
@@ -799,7 +910,7 @@ class TransformerImeService : InputMethodService() {
 
     private fun toggleMode(toJapanese: Boolean) {
         cancelPendingNextPrediction(); cancelPendingRerank()
-        if (compositionBuffer.isNotEmpty()) commitCandidate(currentCandidates.firstOrNull() ?: currentReading)
+        if (compositionBuffer.isNotEmpty()) commitRawReading()
         if (englishBuffer.isNotEmpty()) commitEnglishBuffer(false)
         japaneseMode = toJapanese; englishShift = false; renderKeyboard()
         if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
@@ -825,12 +936,56 @@ class TransformerImeService : InputMethodService() {
             val highlighted = aiBadge != null && index in aiSlots
             val label = if (highlighted) "$candidate  $aiBadge" else candidate
             row.addView(TextView(this).apply {
-                text = label; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.rgb(235,235,235)); setPadding(16.dp(),0,16.dp(),0)
+                text = label
+                textSize = 16f
+                gravity = Gravity.CENTER
+                setTextColor(Color.rgb(235,235,235))
+                setPadding(16.dp(),0,16.dp(),0)
                 setBackgroundColor(if (highlighted) Color.argb(210, 60, 60, 60) else Color.TRANSPARENT)
-                setOnClickListener { onClick(candidate) }
+                setOnClickListener {
+                    emitNicoComment(candidate)
+                    onClick(candidate)
+                }
             }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, 42.dp()))
-            if (index != candidates.lastIndex) row.addView(View(this).apply { setBackgroundColor(Color.rgb(82,82,82)) }, LinearLayout.LayoutParams(1.dp(),24.dp()).apply { gravity = Gravity.CENTER_VERTICAL })
+            if (index != candidates.lastIndex) {
+                row.addView(View(this).apply { setBackgroundColor(Color.rgb(82,82,82)) }, LinearLayout.LayoutParams(1.dp(),24.dp()).apply { gravity = Gravity.CENTER_VERTICAL })
+            }
         }
+    }
+
+    private fun emitNicoComment(candidate: String) {
+        if (secureField || candidate.isBlank()) return
+        val overlay = commentOverlay ?: return
+        overlay.post {
+            if (!serviceAlive || overlay.width <= 0 || overlay.parent == null) return@post
+            val label = TextView(this).apply {
+                text = "$candidate wwww"
+                textSize = 18f
+                setTextColor(Color.WHITE)
+                setTypeface(typeface, Typeface.BOLD)
+                setShadowLayer(3f, 1f, 1f, Color.BLACK)
+                setSingleLine(true)
+            }
+            val lane = commentLane++ % 2
+            overlay.addView(label, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 24.dp()).apply {
+                gravity = Gravity.TOP or Gravity.START
+                topMargin = lane * 22.dp()
+            })
+            label.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+            label.translationX = overlay.width.toFloat() + 12.dp()
+            label.animate()
+                .translationX(-label.measuredWidth.toFloat() - 24.dp())
+                .setDuration(3400L)
+                .setInterpolator(LinearInterpolator())
+                .withEndAction { runCatching { overlay.removeView(label) } }
+                .start()
+        }
+    }
+
+    private fun clearCommentOverlay() {
+        val overlay = commentOverlay ?: return
+        for (i in 0 until overlay.childCount) overlay.getChildAt(i).animate().cancel()
+        overlay.removeAllViews()
     }
 
     private fun textBeforeCursor(): String = currentInputConnection?.getTextBeforeCursor(260, 0)?.toString().orEmpty()
@@ -853,8 +1008,8 @@ class TransformerImeService : InputMethodService() {
     private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 55.dp())
 
     /**
-     * v0.10.3 bottom-glow renderer. Silence is black, normal programme material stays mostly
-     * cyan/violet/pink, and orange is reserved for the upper end of the dynamic range.
+     * v0.10.4 keeps a continuous faint gradient higher into the key field. Silence remains
+     * true black, while the bottom edge is still the apparent light source.
      */
     private class AudioPulseBackgroundView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -863,27 +1018,23 @@ class TransformerImeService : InputMethodService() {
         private var smoothed = 0f
         private var beat = 0f
         private var previousTarget = 0f
+        private var lastDrawn = -1f
 
         fun setPulse(value: Float, enabled: Boolean) {
             audioEnabled = enabled
             val v = value.coerceIn(0f, 1f)
             val rise = (v - previousTarget).coerceAtLeast(0f)
-            if (rise > 0.018f) {
-                beat = maxOf(beat, (rise * 3.6f + v * 0.18f).coerceIn(0f, 1f))
-            }
+            if (rise > 0.018f) beat = maxOf(beat, (rise * 3.6f + v * 0.18f).coerceIn(0f, 1f))
             previousTarget = v
             target = v
-            smoothed = if (target > smoothed) {
-                smoothed * 0.20f + target * 0.80f
-            } else {
-                smoothed * 0.80f + target * 0.20f
-            }
+            smoothed = if (target > smoothed) smoothed * 0.20f + target * 0.80f else smoothed * 0.80f + target * 0.20f
             beat *= 0.76f
-            if (target < 0.01f && smoothed < 0.018f && beat < 0.018f) {
-                smoothed = 0f
-                beat = 0f
+            if (target < 0.01f && smoothed < 0.018f && beat < 0.018f) { smoothed = 0f; beat = 0f }
+            val signature = smoothed + beat * 0.25f + if (audioEnabled) 2f else 0f
+            if (abs(signature - lastDrawn) > 0.0025f) {
+                lastDrawn = signature
+                invalidate()
             }
-            invalidate()
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -892,8 +1043,7 @@ class TransformerImeService : InputMethodService() {
             if (!audioEnabled || width <= 0 || height <= 0) return
 
             val rawEnergy = (smoothed * 0.90f + beat * 0.25f).coerceIn(0f, 1f)
-            val energy = if (rawEnergy < 0.018f) 0f
-            else ((rawEnergy - 0.018f) / 0.982f).coerceIn(0f, 1f)
+            val energy = if (rawEnergy < 0.018f) 0f else ((rawEnergy - 0.018f) / 0.982f).coerceIn(0f, 1f)
             if (energy <= 0f) return
 
             val cyan = Color.rgb(0, 178, 255)
@@ -907,41 +1057,38 @@ class TransformerImeService : InputMethodService() {
                 else -> blend(Color.rgb(255, 52, 112), orange, (energy - 0.92f) / 0.08f)
             }
 
-            val glowHeight = height * (0.28f + energy * 0.44f + beat * 0.06f)
+            // Longer feather than v0.10.3: no visible horizontal cutoff between key rows.
+            val glowHeight = height * (0.48f + energy * 0.40f + beat * 0.04f)
             val topY = (height - glowHeight).coerceAtLeast(0f)
-            val bottomAlpha = (48 + energy * 176 + beat * 18).toInt().coerceIn(0, 244)
-            val midAlpha = (bottomAlpha * (0.52f + energy * 0.16f)).toInt()
-            val soft = blend(reactive, Color.rgb(32, 30, 82), 0.36f)
-            val bright = blend(reactive, Color.WHITE, 0.11f + beat * 0.06f)
+            val bottomAlpha = (46 + energy * 174 + beat * 18).toInt().coerceIn(0, 242)
+            val midAlpha = (bottomAlpha * (0.50f + energy * 0.16f)).toInt()
+            val soft = blend(reactive, Color.rgb(24, 24, 74), 0.42f)
+            val bright = blend(reactive, Color.WHITE, 0.10f + beat * 0.05f)
 
             paint.shader = LinearGradient(
-                0f,
-                topY,
-                0f,
-                height.toFloat(),
+                0f, topY, 0f, height.toFloat(),
                 intArrayOf(
                     Color.TRANSPARENT,
-                    withAlpha(soft, (midAlpha * 0.28f).toInt()),
+                    withAlpha(soft, (midAlpha * 0.08f).toInt()),
+                    withAlpha(soft, (midAlpha * 0.30f).toInt()),
                     withAlpha(reactive, midAlpha),
                     withAlpha(bright, bottomAlpha)
                 ),
-                floatArrayOf(0f, 0.32f, 0.74f, 1f),
+                floatArrayOf(0f, 0.18f, 0.46f, 0.76f, 1f),
                 Shader.TileMode.CLAMP
             )
             canvas.drawRect(0f, topY, width.toFloat(), height.toFloat(), paint)
 
             val radius = width * (0.56f + energy * 0.20f + beat * 0.06f)
             paint.shader = RadialGradient(
-                width * 0.50f,
-                height * 1.04f,
-                radius,
+                width * 0.50f, height * 1.03f, radius,
                 intArrayOf(
                     withAlpha(bright, (bottomAlpha * 0.88f).toInt()),
                     withAlpha(reactive, (bottomAlpha * 0.54f).toInt()),
-                    withAlpha(soft, (bottomAlpha * 0.16f).toInt()),
+                    withAlpha(soft, (bottomAlpha * 0.14f).toInt()),
                     Color.TRANSPARENT
                 ),
-                floatArrayOf(0f, 0.30f, 0.66f, 1f),
+                floatArrayOf(0f, 0.30f, 0.68f, 1f),
                 Shader.TileMode.CLAMP
             )
             canvas.drawRect(0f, topY, width.toFloat(), height.toFloat(), paint)
@@ -949,12 +1096,10 @@ class TransformerImeService : InputMethodService() {
             if (beat > 0.12f) {
                 val beatRadius = width * (0.32f + beat * 0.16f)
                 paint.shader = RadialGradient(
-                    width * 0.50f,
-                    height * 1.02f,
-                    beatRadius,
+                    width * 0.50f, height * 1.01f, beatRadius,
                     intArrayOf(
-                        withAlpha(Color.WHITE, (beat * 66f).toInt()),
-                        withAlpha(reactive, (beat * 82f).toInt()),
+                        withAlpha(Color.WHITE, (beat * 62f).toInt()),
+                        withAlpha(reactive, (beat * 80f).toInt()),
                         Color.TRANSPARENT
                     ),
                     floatArrayOf(0f, 0.46f, 1f),
