@@ -58,7 +58,8 @@ class ConversionAndModelTest {
         assertEquals("ば", FlickKana.applyDakuten("ぱ"))
         assertEquals("ぱ", FlickKana.applyHandakuten("は"))
         assertEquals("ぱ", FlickKana.applyHandakuten("ば"))
-        assertEquals("こんにちは", FlickKana.applyHandakuten("こんにちは"))
+        assertEquals("こんにちぱ", FlickKana.applyHandakuten("こんにちは"))
+        assertEquals("か", FlickKana.applyHandakuten("か"))
     }
 
     @Test
