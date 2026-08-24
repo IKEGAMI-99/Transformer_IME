@@ -12,9 +12,9 @@ import kotlin.math.tanh
 /**
  * On-device sparse Transformer used for the second-stage IME reranker.
  *
- * v0.3 loads an INT8 model trained with next-character prediction on a Japanese sentence
- * corpus. A deterministic benchmark model remains available as a fallback for source builds
- * where the generated training asset has not been created yet.
+ * v0.7 grows the corpus-trained model from ~5M to ~21M parameters while keeping Top-1 MoE
+ * routing. Vocabulary buckets, hidden width and context are all expanded so the extra capacity
+ * improves Japanese ranking rather than merely inflating dormant experts.
  */
 class MediumMoETransformer private constructor(
     private val tokenEmbedding: FloatArray,
@@ -65,11 +65,7 @@ class MediumMoETransformer private constructor(
         if (candidates.size <= 1) return RankResult(candidates, 0)
         val started = System.nanoTime()
 
-        // The model was trained as a Japanese language model, not as a reading encoder.
-        // Use already-committed text as the linguistic context and leave kana->kanji validity
-        // to CandidateGenerator. This avoids teaching the LM that the unconverted reading is
-        // part of the final sentence.
-        val context = contextText.takeLast(80)
+        val context = contextText.takeLast(160)
         val hidden = encode(context)
         val rawScores = candidates.map { candidateScore(hidden, it) }
         val mean = rawScores.average().toFloat()
@@ -81,8 +77,9 @@ class MediumMoETransformer private constructor(
         variance /= max(1, rawScores.size)
         val std = sqrt(variance + 1e-6f)
 
-        val aiWeight = if (corpusTrained) 0.42f else 0.18f
-        val priorWeight = if (corpusTrained) 0.50f else 0.58f
+        // The larger corpus-trained model gets more authority than the old 5M reranker.
+        val aiWeight = if (corpusTrained) 0.62f else 0.18f
+        val priorWeight = if (corpusTrained) 0.38f else 0.58f
         val ranked = candidates.withIndex()
             .sortedByDescending { indexed ->
                 val prior = (candidates.size - indexed.index) * priorWeight
@@ -167,13 +164,12 @@ class MediumMoETransformer private constructor(
     }
 
     /**
-     * The LM head predicts the next character bucket. The first candidate character therefore
-     * carries the most weight; a short decaying look-ahead keeps compounds distinguishable
-     * without running a full Transformer pass for every candidate.
+     * Score the leading characters of a candidate from the shared context hidden state.
+     * More vocabulary buckets in v0.7 sharply reduce collisions between Japanese characters.
      */
     private fun candidateScore(hidden: FloatArray, candidate: String): Float {
         if (candidate.isEmpty()) return -100f
-        val weights = floatArrayOf(1f, 0.45f, 0.22f, 0.11f)
+        val weights = floatArrayOf(1f, 0.52f, 0.30f, 0.18f, 0.10f, 0.06f)
         var score = 0f
         var weightSum = 0f
         candidate.take(weights.size).forEachIndexed { index, ch ->
@@ -185,11 +181,9 @@ class MediumMoETransformer private constructor(
             weightSum += weights[index]
         }
 
-        // A small embedding compatibility term is useful for candidates sharing the same first
-        // character, and is learned too when corpus weights are loaded.
         val vector = FloatArray(DIM)
         var count = 0
-        candidate.take(6).forEach { ch ->
+        candidate.take(8).forEach { ch ->
             val tokenBase = charBucket(ch) * DIM
             for (d in 0 until DIM) vector[d] += tokenEmbedding[tokenBase + d]
             count++
@@ -198,7 +192,7 @@ class MediumMoETransformer private constructor(
         if (count > 0) {
             for (d in 0 until DIM) compatibility += hidden[d] * (vector[d] / count)
         }
-        return score / weightSum.coerceAtLeast(1e-6f) + compatibility * 0.05f
+        return score / weightSum.coerceAtLeast(1e-6f) + compatibility * 0.06f
     }
 
     private fun tokenize(text: String): IntArray {
@@ -250,12 +244,7 @@ class MediumMoETransformer private constructor(
         return out
     }
 
-    private fun layerNorm(
-        input: FloatArray,
-        rows: Int,
-        weight: FloatArray,
-        bias: FloatArray
-    ): FloatArray {
+    private fun layerNorm(input: FloatArray, rows: Int, weight: FloatArray, bias: FloatArray): FloatArray {
         val out = FloatArray(input.size)
         for (r in 0 until rows) {
             val base = r * DIM
@@ -330,7 +319,6 @@ class MediumMoETransformer private constructor(
 
     private class FastRng(seed: Int) {
         private var state = seed
-
         fun nextSigned(scale: Float): Float {
             var x = state
             x = x xor (x shl 13)
@@ -343,23 +331,20 @@ class MediumMoETransformer private constructor(
     }
 
     companion object {
-        const val DIM = 128
-        const val HEADS = 4
-        const val FF_DIM = 272
+        const val DIM = 192
+        const val HEADS = 6
+        const val FF_DIM = 384
         const val LAYERS = 4
-        const val EXPERTS = 16
-        const val VOCAB_BUCKETS = 1024
-        const val CONTEXT_LENGTH = 24
+        const val EXPERTS = 32
+        const val VOCAB_BUCKETS = 4096
+        const val CONTEXT_LENGTH = 48
         private const val BOS_BUCKET = 1
         private const val ASSET_NAME = "medium_moe_jpn.q8"
+        private const val MIN_PARAMETERS = 20_000_000
 
-        fun load(context: Context): MediumMoETransformer {
-            return runCatching {
-                context.assets.open(ASSET_NAME).use(::loadQuantized)
-            }.getOrElse {
-                create()
-            }
-        }
+        fun load(context: Context): MediumMoETransformer = runCatching {
+            context.assets.open(ASSET_NAME).use(::loadQuantized)
+        }.getOrElse { create() }
 
         internal fun loadQuantized(input: InputStream): MediumMoETransformer {
             val bytes = input.readBytes()
@@ -388,22 +373,17 @@ class MediumMoETransformer private constructor(
             val positionEmbedding = readArray(CONTEXT_LENGTH * DIM)
             val blocks = Array(LAYERS) {
                 Block(
-                    ln1w = readArray(DIM),
-                    ln1b = readArray(DIM),
+                    ln1w = readArray(DIM), ln1b = readArray(DIM),
                     qw = readArray(DIM * DIM), qb = readArray(DIM),
                     kw = readArray(DIM * DIM), kb = readArray(DIM),
                     vw = readArray(DIM * DIM), vb = readArray(DIM),
                     ow = readArray(DIM * DIM), ob = readArray(DIM),
-                    ln2w = readArray(DIM),
-                    ln2b = readArray(DIM),
-                    routerW = readArray(EXPERTS * DIM),
-                    routerB = readArray(EXPERTS),
+                    ln2w = readArray(DIM), ln2b = readArray(DIM),
+                    routerW = readArray(EXPERTS * DIM), routerB = readArray(EXPERTS),
                     experts = Array(EXPERTS) {
                         Expert(
-                            w1 = readArray(FF_DIM * DIM),
-                            b1 = readArray(FF_DIM),
-                            w2 = readArray(DIM * FF_DIM),
-                            b2 = readArray(DIM)
+                            w1 = readArray(FF_DIM * DIM), b1 = readArray(FF_DIM),
+                            w2 = readArray(DIM * FF_DIM), b2 = readArray(DIM)
                         )
                     }
                 )
@@ -413,25 +393,20 @@ class MediumMoETransformer private constructor(
             require(!buffer.hasRemaining()) { "Unexpected bytes at end of Medium model" }
 
             return MediumMoETransformer(
-                tokenEmbedding = tokenEmbedding,
-                positionEmbedding = positionEmbedding,
-                blocks = blocks,
-                outputHead = outputHead,
-                outputBias = outputBias,
+                tokenEmbedding, positionEmbedding, blocks, outputHead, outputBias,
                 corpusTrained = true,
-                sourceLabel = "Tatoeba Japanese · INT8"
+                sourceLabel = "Tatoeba Japanese · 21M · INT8"
             ).also {
-                require(it.parameterCount >= 5_000_000) {
-                    "Expected >= 5M parameters, got ${it.parameterCount}"
+                require(it.parameterCount >= MIN_PARAMETERS) {
+                    "Expected >=20M parameters, got ${it.parameterCount}"
                 }
             }
         }
 
         /** Deterministic fallback used when the generated corpus-trained asset is absent. */
-        fun create(seed: Int = 0x534f4c33): MediumMoETransformer {
+        fun create(seed: Int = 0x534f4c37): MediumMoETransformer {
             val rng = FastRng(seed)
-            fun randomArray(size: Int, scale: Float = 0.022f) =
-                FloatArray(size) { rng.nextSigned(scale) }
+            fun randomArray(size: Int, scale: Float = 0.022f) = FloatArray(size) { rng.nextSigned(scale) }
             fun zeros(size: Int) = FloatArray(size)
             fun ones(size: Int) = FloatArray(size) { 1f }
 
@@ -439,38 +414,30 @@ class MediumMoETransformer private constructor(
             val positionEmbedding = randomArray(CONTEXT_LENGTH * DIM, 0.018f)
             val blocks = Array(LAYERS) {
                 Block(
-                    ln1w = ones(DIM),
-                    ln1b = zeros(DIM),
+                    ln1w = ones(DIM), ln1b = zeros(DIM),
                     qw = randomArray(DIM * DIM), qb = zeros(DIM),
                     kw = randomArray(DIM * DIM), kb = zeros(DIM),
                     vw = randomArray(DIM * DIM), vb = zeros(DIM),
                     ow = randomArray(DIM * DIM), ob = zeros(DIM),
-                    ln2w = ones(DIM),
-                    ln2b = zeros(DIM),
-                    routerW = randomArray(EXPERTS * DIM, 0.03f),
-                    routerB = zeros(EXPERTS),
+                    ln2w = ones(DIM), ln2b = zeros(DIM),
+                    routerW = randomArray(EXPERTS * DIM, 0.03f), routerB = zeros(EXPERTS),
                     experts = Array(EXPERTS) {
                         Expert(
-                            w1 = randomArray(FF_DIM * DIM, 0.024f),
-                            b1 = zeros(FF_DIM),
-                            w2 = randomArray(DIM * FF_DIM, 0.024f),
-                            b2 = zeros(DIM)
+                            w1 = randomArray(FF_DIM * DIM, 0.024f), b1 = zeros(FF_DIM),
+                            w2 = randomArray(DIM * FF_DIM, 0.024f), b2 = zeros(DIM)
                         )
                     }
                 )
             }
 
             return MediumMoETransformer(
-                tokenEmbedding = tokenEmbedding,
-                positionEmbedding = positionEmbedding,
-                blocks = blocks,
-                outputHead = randomArray(VOCAB_BUCKETS * DIM, 0.035f),
-                outputBias = zeros(VOCAB_BUCKETS),
+                tokenEmbedding, positionEmbedding, blocks,
+                randomArray(VOCAB_BUCKETS * DIM, 0.035f), zeros(VOCAB_BUCKETS),
                 corpusTrained = false,
-                sourceLabel = "benchmark fallback"
+                sourceLabel = "21M benchmark fallback"
             ).also {
-                require(it.parameterCount >= 5_000_000) {
-                    "Expected >= 5M parameters, got ${it.parameterCount}"
+                require(it.parameterCount >= MIN_PARAMETERS) {
+                    "Expected >=20M parameters, got ${it.parameterCount}"
                 }
             }
         }
