@@ -30,13 +30,13 @@ class MainActivity : Activity() {
             textSize = 30f
         })
         root.addView(TextView(this).apply {
-            text = "v0.3.0 · 日本語Corpus-trained 5M MoE"
+            text = "v0.4.0 · フリック入力 + Mozc辞書 + JP5M"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 28.dp())
         })
 
         root.addView(TextView(this).apply {
-            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n入力内容は外部サーバーへ送信しません。パスワード欄ではAI候補を停止します。"
+            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n日本語は12キーのフリック入力、英数モードはQWERTY入力です。入力内容は外部サーバーへ送信しません。パスワード欄ではAI候補を停止します。"
             textSize = 17f
             setLineSpacing(0f, 1.2f)
         })
@@ -71,19 +71,21 @@ class MainActivity : Activity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "v0.3 AI構成\n" +
+            text = "v0.4 入力・変換構成\n" +
+                "・日本語: 12キー5方向フリック + 濁点/半濁点/小文字キー\n" +
+                "・英語: QWERTY + Shift\n" +
+                "・通常変換: Mozc OSS辞書をCIで小型SQLiteへ変換し、地名・人名を含む候補をオンデバイス検索\n" +
                 "・Tiny Transformer: 即時候補と次語予測\n" +
                 "・Japanese Medium MoE: 5,022,784 parameters / ${MediumMoETransformer.LAYERS} layers / ${MediumMoETransformer.EXPERTS} experts / hidden ${MediumMoETransformer.DIM}\n" +
-                "・Tatoeba日本語文コーパスで次文字予測学習\n" +
-                "・INT8重みを端末内で復号し、Top-1 expertのみ実行\n\n" +
-                "約140ms入力が止まると日本語学習済み5Mモデルが再ランキングします。学習済みモデルが動作した場合は候補先頭に『✦JP5M xxms』を表示します。"
+                "・Tatoeba日本語文コーパスで次文字予測学習\n\n" +
+                "日本語学習済み5Mモデルが動作すると候補先頭に『✦JP5M』、拡張辞書もロード済みなら『·D』を付けます。"
             textSize = 14f
             setPadding(0, 18.dp(), 0, 0)
             setLineSpacing(0f, 1.15f)
         })
 
         root.addView(TextView(this).apply {
-            text = "Tatoeba Project contributors · CC BY 2.0 FR。生コーパスはAPKに含めず、学習後の量子化モデルのみ同梱します。"
+            text = "Tatoeba Project contributors · CC BY 2.0 FR。Mozc OSS dictionaryにはIPAdic等のOSS/公開データが含まれます。詳細な著作権表示はREADMEを参照してください。"
             textSize = 12f
             setPadding(0, 20.dp(), 0, 0)
         })
