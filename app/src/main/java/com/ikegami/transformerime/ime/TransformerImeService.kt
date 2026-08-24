@@ -336,11 +336,11 @@ class TransformerImeService : InputMethodService() {
         addJapaneseRow(root, "記号", listOf("ま", "や", "ら"), functionButton("空白") { handleJapaneseSpace() }, ::showSymbolCandidates)
 
         val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(Color.TRANSPARENT) }
-        bottom.addView(functionButton("あa1", pill = true) { toggleMode(false) }, japaneseSideParams())
+        bottom.addView(functionButton("あa1") { toggleMode(false) }, japaneseSideParams())
         bottom.addView(kanaModifierFlickButton(), japaneseCenterParams())
         bottom.addView(flickButton("わ"), japaneseCenterParams())
         bottom.addView(flickButton("、。"), japaneseCenterParams())
-        bottom.addView(functionButton("↵", accent = true) { handleEnter() }, japaneseSideParams())
+        bottom.addView(functionButton("↵") { handleEnter() }, japaneseSideParams())
         root.addView(bottom, japaneseRowParams())
     }
 
@@ -403,7 +403,7 @@ class TransformerImeService : InputMethodService() {
                 val key: View = when (label) {
                     "⌫" -> deleteRepeatButton()
                     "かな" -> numberPadButton(label) { renderKeyboard() }
-                    "↵" -> numberPadButton(label, accent = true) { handleEnter() }
+                    "↵" -> numberPadButton(label) { handleEnter() }
                     else -> numberPadButton(label) { commitDirect(label) }
                 }
                 row.addView(key, LinearLayout.LayoutParams(0, 62.dp(), 1f).apply {
@@ -649,7 +649,7 @@ class TransformerImeService : InputMethodService() {
         bottom.addView(qwertyButton(",", 0.8f) { commitEnglishPunctuation(",") })
         bottom.addView(qwertyButton("space", 3.3f) { handleEnglishSpace() })
         bottom.addView(qwertyButton(".", 0.8f) { commitEnglishPunctuation(".") })
-        bottom.addView(qwertyButton("↵", 1.2f, accent = true) { handleEnter() })
+        bottom.addView(qwertyButton("↵", 1.2f) { handleEnter() })
         root.addView(bottom, qwertyRowParams())
     }
 
