@@ -1,6 +1,8 @@
 package com.ikegami.transformerime
 
 import com.ikegami.transformerime.conversion.CandidateGenerator
+import com.ikegami.transformerime.ime.FlickDirection
+import com.ikegami.transformerime.ime.FlickKana
 import com.ikegami.transformerime.model.MediumMoETransformer
 import java.io.File
 import java.io.FileInputStream
@@ -15,6 +17,28 @@ class ConversionAndModelTest {
         assertTrue(candidates.isNotEmpty())
         assertEquals("今日は天気が良い", candidates.first())
         assertTrue(candidates.contains("今日は天気がいい"))
+    }
+
+    @Test
+    fun japaneseFlickDirectionsMatchStandardVowels() {
+        assertEquals("あ", FlickKana.output("あ", FlickDirection.CENTER))
+        assertEquals("い", FlickKana.output("あ", FlickDirection.LEFT))
+        assertEquals("う", FlickKana.output("あ", FlickDirection.UP))
+        assertEquals("え", FlickKana.output("あ", FlickDirection.RIGHT))
+        assertEquals("お", FlickKana.output("あ", FlickDirection.DOWN))
+        assertEquals("こ", FlickKana.output("か", FlickDirection.DOWN))
+        assertEquals("ん", FlickKana.output("わ", FlickDirection.UP))
+    }
+
+    @Test
+    fun kanaModifierCyclesDakutenHandakutenAndSmallKana() {
+        assertEquals("が", FlickKana.modifyLast("か"))
+        assertEquals("か", FlickKana.modifyLast("が"))
+        assertEquals("ば", FlickKana.modifyLast("は"))
+        assertEquals("ぱ", FlickKana.modifyLast("ば"))
+        assertEquals("は", FlickKana.modifyLast("ぱ"))
+        assertEquals("っ", FlickKana.modifyLast("づ"))
+        assertEquals("ゃ", FlickKana.modifyLast("や"))
     }
 
     @Test
