@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build a compact on-device kana->surface SQLite dictionary from Mozc OSS data.
 
-v0.6 also builds a compact prefix-completion table.  This lets the IME suggest a
-longer conversion before the user has finished typing its full reading, e.g.
-「うめ」 -> 「梅田」.
+v0.6 adds a *small* 2/3-kana prefix index for predictive conversion.  Longer typed
+readings filter those indexed full readings at runtime.  Mozc manual place/name/word
+entries receive a lower predictive cost so useful named entities survive the compact index.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ MOZC_REV = "master"
 RAW_ROOT = f"https://raw.githubusercontent.com/google/mozc/{MOZC_REV}/src/data"
 BASE_FILES = [f"dictionary_oss/dictionary{i:02d}.txt" for i in range(10)]
 MANUAL_FILES = ["dictionary_manual/places.tsv", "dictionary_manual/words.tsv"]
+PREFIX_KEEP = 16
 
 
 def download(url: str, path: Path) -> None:
@@ -37,10 +38,7 @@ def normalize_reading(text: str) -> str:
     chars = []
     for ch in text.strip():
         code = ord(ch)
-        if 0x30A1 <= code <= 0x30F6:
-            chars.append(chr(code - 0x60))
-        else:
-            chars.append(ch)
+        chars.append(chr(code - 0x60) if 0x30A1 <= code <= 0x30F6 else ch)
     return "".join(chars)
 
 
@@ -79,7 +77,7 @@ def parse_base(path: Path, entries: dict[str, dict[str, int]]) -> int:
     return count
 
 
-def parse_manual(path: Path, entries: dict[str, dict[str, int]], preferred_cost: int = 2600) -> int:
+def parse_manual(path: Path, entries: dict[str, dict[str, int]], preferred_cost: int = 1200) -> int:
     count = 0
     with path.open("r", encoding="utf-8", errors="replace") as source:
         for line in source:
@@ -93,15 +91,12 @@ def parse_manual(path: Path, entries: dict[str, dict[str, int]], preferred_cost:
     return count
 
 
-def keep_prefix_candidate(
-    bucket: dict[str, tuple[int, str]], surface: str, score: int, reading: str, max_candidates: int
-) -> None:
+def keep_prefix_candidate(bucket: dict[str, tuple[int, str]], surface: str, score: int, reading: str) -> None:
     old = bucket.get(surface)
     if old is None or score < old[0]:
         bucket[surface] = (score, reading)
-    # Bound memory while processing the ~750k-reading Mozc dictionary.
-    if len(bucket) > max_candidates * 3:
-        trimmed = sorted(bucket.items(), key=lambda item: (item[1][0], len(item[0]), item[0]))[: max_candidates * 2]
+    if len(bucket) > PREFIX_KEEP * 3:
+        trimmed = sorted(bucket.items(), key=lambda item: (item[1][0], len(item[1][1]), item[0]))[: PREFIX_KEEP * 2]
         bucket.clear()
         bucket.update(trimmed)
 
@@ -137,8 +132,6 @@ def build_database(output: Path, entries: dict[str, dict[str, int]], max_candida
 
     written = 0
     batch = []
-    # Prefix completion is intentionally capped.  We keep two strong surfaces per full reading,
-    # and only prefixes of 2..7 kana.  That gives useful completion without making the APK huge.
     prefix_map: dict[str, dict[str, tuple[int, str]]] = defaultdict(dict)
 
     for reading in sorted(entries):
@@ -150,15 +143,18 @@ def build_database(output: Path, entries: dict[str, dict[str, int]], max_candida
                 conn.executemany("INSERT INTO entries(reading,surface,cost) VALUES(?,?,?)", batch)
                 batch.clear()
 
-        if len(reading) >= 3:
-            for alt_index, (surface, cost) in enumerate(ranked[:2]):
-                max_prefix = min(7, len(reading) - 1)
-                for prefix_len in range(2, max_prefix + 1):
+        # Keep the predictive index compact: only strong dictionary readings, only their best
+        # surface, and only the 2/3-kana prefixes.  A longer live reading filters by full reading.
+        if len(reading) >= 3 and ranked:
+            surface, cost = ranked[0]
+            if cost <= 5500:
+                for prefix_len in (2, 3):
+                    if prefix_len >= len(reading):
+                        continue
                     prefix = reading[:prefix_len]
                     extension = len(reading) - prefix_len
-                    # Prefer normal Mozc cost, shorter completion distance and the first surface.
-                    predictive_cost = cost + extension * 95 + alt_index * 140
-                    keep_prefix_candidate(prefix_map[prefix], surface, predictive_cost, reading, 8)
+                    predictive_cost = cost + extension * 110
+                    keep_prefix_candidate(prefix_map[prefix], surface, predictive_cost, reading)
 
     if batch:
         conn.executemany("INSERT INTO entries(reading,surface,cost) VALUES(?,?,?)", batch)
@@ -169,7 +165,7 @@ def build_database(output: Path, entries: dict[str, dict[str, int]], max_candida
         ranked = sorted(
             prefix_map[prefix].items(),
             key=lambda item: (item[1][0], len(item[1][1]), len(item[0]), item[0]),
-        )[:8]
+        )[:PREFIX_KEEP]
         for surface, (cost, reading) in ranked:
             prediction_batch.append((prefix, reading, surface, cost))
             predictive_written += 1
@@ -198,8 +194,11 @@ def build_database(output: Path, entries: dict[str, dict[str, int]], max_candida
     conn.execute("VACUUM")
     conn.close()
 
-    digest = hashlib.sha256(output.read_bytes()).hexdigest()
-    return {**metadata, "file_size": output.stat().st_size, "sha256": digest}
+    return {
+        **metadata,
+        "file_size": output.stat().st_size,
+        "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+    }
 
 
 def main() -> None:
@@ -228,11 +227,9 @@ def main() -> None:
 
     info = build_database(args.output, entries, args.max_candidates)
     info["parsed_source_rows"] = parsed
-
     if args.metadata:
         args.metadata.parent.mkdir(parents=True, exist_ok=True)
         args.metadata.write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
     print(json.dumps(info, ensure_ascii=False, indent=2))
 
 
