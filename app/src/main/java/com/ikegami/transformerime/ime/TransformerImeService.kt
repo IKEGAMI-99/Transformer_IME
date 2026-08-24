@@ -22,6 +22,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.ikegami.transformerime.conversion.CandidateGenerator
 import com.ikegami.transformerime.conversion.NextCandidateGenerator
+import com.ikegami.transformerime.learning.UserLearningStore
 import com.ikegami.transformerime.model.MediumMoETransformer
 import com.ikegami.transformerime.model.ModelRepository
 import com.ikegami.transformerime.model.TinyTransformerModel
@@ -38,6 +39,7 @@ class TransformerImeService : InputMethodService() {
     private var secureField = false
     private var aiEnabledByUser = true
     private var model: TinyTransformerModel? = null
+    private var learningStore: UserLearningStore? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val inferenceExecutor = Executors.newSingleThreadExecutor()
@@ -54,6 +56,7 @@ class TransformerImeService : InputMethodService() {
     override fun onCreate() {
         super.onCreate()
         model = ModelRepository.get(this)
+        learningStore = UserLearningStore(this)
         inferenceExecutor.execute {
             CandidateGenerator.initialize(this)
             mediumModel = runCatching { MediumMoETransformer.load(this) }.getOrNull()
@@ -64,6 +67,7 @@ class TransformerImeService : InputMethodService() {
         cancelPendingRerank()
         cancelPendingNextPrediction()
         runCatching { mediumModel?.close() }
+        runCatching { learningStore?.close() }
         inferenceExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -127,10 +131,7 @@ class TransformerImeService : InputMethodService() {
             setPadding(6.dp(), 0, 6.dp(), 0)
             setBackgroundColor(CANDIDATE_BG)
         }
-        scroll.addView(
-            candidateRow,
-            FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 50.dp())
-        )
+        scroll.addView(candidateRow, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 50.dp()))
         candidateHost.addView(scroll, LinearLayout.LayoutParams(0, 50.dp(), 1f))
         root.addView(candidateHost, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 50.dp()))
 
@@ -138,12 +139,8 @@ class TransformerImeService : InputMethodService() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(BLACK)
         }
-        root.addView(
-            keyboardContainer,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        )
+        root.addView(keyboardContainer, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         renderKeyboard()
-
         root.requestApplyInsets()
         postNextPredictions()
         return root
@@ -210,7 +207,6 @@ class TransformerImeService : InputMethodService() {
                         if (dy < 0) FlickDirection.UP else FlickDirection.DOWN
                     }
                 }
-
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         cancelPendingNextPrediction()
@@ -243,36 +239,28 @@ class TransformerImeService : InputMethodService() {
         }
     }
 
-    private fun functionButton(
-        label: String,
-        pill: Boolean = false,
-        accent: Boolean = false,
-        action: () -> Unit
-    ): Button = darkButton(label, large = false, pill = pill, accent = accent).apply {
-        setOnClickListener {
-            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            action()
+    private fun functionButton(label: String, pill: Boolean = false, accent: Boolean = false, action: () -> Unit): Button =
+        darkButton(label, large = false, pill = pill, accent = accent).apply {
+            setOnClickListener {
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                action()
+            }
         }
-    }
 
-    private fun darkButton(
-        label: String,
-        large: Boolean,
-        pill: Boolean = false,
-        accent: Boolean = false
-    ): Button = Button(this).apply {
-        text = label
-        textSize = if (large) 26f else if (label.length > 3) 14f else 19f
-        setTextColor(if (accent) Color.WHITE else Color.rgb(238, 238, 238))
-        gravity = Gravity.CENTER
-        isAllCaps = false
-        minWidth = 0
-        minimumWidth = 0
-        minHeight = 0
-        minimumHeight = 0
-        setPadding(0, 0, 0, 0)
-        background = keyStateDrawable(pill = pill, accent = accent)
-    }
+    private fun darkButton(label: String, large: Boolean, pill: Boolean = false, accent: Boolean = false): Button =
+        Button(this).apply {
+            text = label
+            textSize = if (large) 26f else if (label.length > 3) 14f else 19f
+            setTextColor(Color.rgb(238, 238, 238))
+            gravity = Gravity.CENTER
+            isAllCaps = false
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(0, 0, 0, 0)
+            background = keyStateDrawable(pill, accent)
+        }
 
     private fun keyStateDrawable(pill: Boolean, accent: Boolean): StateListDrawable {
         fun shape(color: Int): GradientDrawable = GradientDrawable().apply {
@@ -347,7 +335,6 @@ class TransformerImeService : InputMethodService() {
     private fun buildEnglishQwertyKeyboard(root: LinearLayout) {
         addEnglishLetterRow(root, listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"))
         addEnglishLetterRow(root, listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"), 13)
-
         val third = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(BLACK) }
         third.addView(qwertyButton(if (englishShift) "⇧●" else "⇧", 1.25f) {
             englishShift = !englishShift
@@ -393,10 +380,7 @@ class TransformerImeService : InputMethodService() {
             setOnClickListener { action() }
         }.also {
             it.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, weight).apply {
-                marginStart = 2.dp()
-                marginEnd = 2.dp()
-                topMargin = 2.dp()
-                bottomMargin = 2.dp()
+                marginStart = 2.dp(); marginEnd = 2.dp(); topMargin = 2.dp(); bottomMargin = 2.dp()
             }
         }
 
@@ -447,7 +431,8 @@ class TransformerImeService : InputMethodService() {
 
         currentInputConnection?.setComposingText(reading, 1)
         val base = CandidateGenerator.candidates(reading)
-        val tinyRanked = if (aiActive()) model?.rankCandidates(compositionContext, base) ?: base else base
+        val personalized = if (!secureField) learningStore?.rankConversions(reading, base) ?: base else base
+        val tinyRanked = if (aiActive()) model?.rankCandidates(compositionContext, personalized) ?: personalized else personalized
         currentCandidates = tinyRanked
         showCandidates(tinyRanked, if (aiActive() && tinyRanked.isNotEmpty()) "✦" else null) { commitCandidate(it) }
         scheduleMediumRerank(reading, tinyRanked)
@@ -468,12 +453,12 @@ class TransformerImeService : InputMethodService() {
                 mainHandler.post {
                     if (epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@post
                     currentCandidates = result.candidates
-                    val modelTag = if (medium.corpusTrained) "✦Z190" else "✦Tiny"
+                    val modelTag = if (medium.corpusTrained) "✦Z95" else "✦Tiny"
                     val dictionaryTag = if (CandidateGenerator.extendedDictionaryReady) "·D" else ""
                     showCandidates(
                         result.candidates,
                         "$modelTag$dictionaryTag ${result.latencyMs}ms",
-                        aiCount = if (medium.corpusTrained) 3 else 1
+                        aiSlots = if (medium.corpusTrained) setOf(0, 2, 3) else setOf(0)
                     ) { commitCandidate(it) }
                 }
             }
@@ -530,6 +515,7 @@ class TransformerImeService : InputMethodService() {
         cancelPendingRerank()
         if (compositionBuffer.isNotEmpty()) {
             val candidate = currentCandidates.firstOrNull() ?: currentReading
+            if (!secureField) learningStore?.recordConversion(currentReading, candidate)
             currentInputConnection?.commitText(candidate, 1)
             clearCompositionState()
         }
@@ -540,6 +526,8 @@ class TransformerImeService : InputMethodService() {
     private fun commitCandidate(candidate: String) {
         cancelPendingNextPrediction()
         cancelPendingRerank()
+        val readingSnapshot = currentReading
+        if (!secureField && readingSnapshot.isNotBlank()) learningStore?.recordConversion(readingSnapshot, candidate)
         currentInputConnection?.commitText(candidate, 1)
         clearCompositionState()
         postNextPredictions()
@@ -556,7 +544,9 @@ class TransformerImeService : InputMethodService() {
         cancelPendingNextPrediction()
         cancelPendingRerank()
         if (compositionBuffer.isNotEmpty()) {
-            currentInputConnection?.commitText(currentCandidates.firstOrNull() ?: currentReading, 1)
+            val candidate = currentCandidates.firstOrNull() ?: currentReading
+            if (!secureField) learningStore?.recordConversion(currentReading, candidate)
+            currentInputConnection?.commitText(candidate, 1)
             clearCompositionState()
         }
         japaneseMode = toJapanese
@@ -579,7 +569,8 @@ class TransformerImeService : InputMethodService() {
         }
 
         val tiny = model?.predictNext(context, 8).orEmpty().map { it.text }
-        val pool = NextCandidateGenerator.candidates(context, tiny)
+        val rawPool = NextCandidateGenerator.candidates(context, tiny)
+        val pool = if (!secureField) learningStore?.rankNext(context, rawPool) ?: rawPool else rawPool
         if (pool.isEmpty()) {
             showCandidates(emptyList(), null) { }
             return
@@ -594,22 +585,29 @@ class TransformerImeService : InputMethodService() {
         val medium = mediumModel ?: return
         if (!aiActive() || candidates.isEmpty()) return
         val epoch = ++predictionEpoch
-        val contextTail = context.takeLast(160)
+        val contextTail = context.takeLast(180)
         val pool = candidates.toList()
 
         val runnable = Runnable {
             if (epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@Runnable
             inferenceExecutor.execute {
                 val result = runCatching { medium.rerank(contextTail, "", pool) }.getOrNull() ?: return@execute
+                val personalized = if (!secureField) {
+                    val firstAi = result.candidates.take(3)
+                    val rest = result.candidates.drop(3)
+                    val rankedAi = learningStore?.rankNext(contextTail, firstAi) ?: firstAi
+                    val rankedRest = learningStore?.rankNext(contextTail, rest) ?: rest
+                    (rankedAi + rankedRest).distinct()
+                } else result.candidates
                 mainHandler.post {
                     if (epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@post
-                    if (textBeforeCursor().takeLast(160) != contextTail) return@post
-                    currentCandidates = result.candidates
-                    val modelTag = if (medium.corpusTrained) "✦次Z190" else "✦次Tiny"
+                    if (textBeforeCursor().takeLast(180) != contextTail) return@post
+                    currentCandidates = personalized
+                    val modelTag = if (medium.corpusTrained) "✦次Z95" else "✦次Tiny"
                     showCandidates(
-                        result.candidates.take(8),
+                        personalized.take(10),
                         "$modelTag ${result.latencyMs}ms",
-                        aiCount = if (medium.corpusTrained) 3 else 1
+                        aiSlots = if (medium.corpusTrained) setOf(0, 1, 2) else setOf(0)
                     ) { commitPrediction(it) }
                 }
             }
@@ -620,6 +618,8 @@ class TransformerImeService : InputMethodService() {
 
     private fun commitPrediction(prediction: String) {
         cancelPendingNextPrediction()
+        val context = textBeforeCursor()
+        if (!secureField && context.isNotBlank()) learningStore?.recordNext(context, prediction)
         currentInputConnection?.commitText(prediction, 1)
         postNextPredictions()
     }
@@ -627,18 +627,20 @@ class TransformerImeService : InputMethodService() {
     private fun showCandidates(
         candidates: List<String>,
         aiBadge: String?,
-        aiCount: Int = if (aiBadge != null) 1 else 0,
+        aiSlots: Set<Int> = if (aiBadge != null) setOf(0) else emptySet(),
         onClick: (String) -> Unit
     ) {
         val row = candidateRow ?: return
         row.removeAllViews()
+        val orderedAiSlots = aiSlots.filter { it in candidates.indices }.sorted()
         candidates.forEachIndexed { index, candidate ->
-            val aiHighlighted = aiBadge != null && index < aiCount
+            val aiRank = orderedAiSlots.indexOf(index)
+            val aiHighlighted = aiBadge != null && aiRank >= 0
             val label = when {
                 !aiHighlighted -> candidate
-                aiCount <= 1 -> "$candidate  $aiBadge"
-                index == 0 -> "$candidate  ✦AI1  $aiBadge"
-                else -> "$candidate  ✦AI${index + 1}"
+                orderedAiSlots.size <= 1 -> "$candidate  $aiBadge"
+                aiRank == 0 -> "$candidate  ✦AI1  $aiBadge"
+                else -> "$candidate  ✦AI${aiRank + 1}"
             }
             row.addView(TextView(this).apply {
                 text = label
@@ -660,7 +662,7 @@ class TransformerImeService : InputMethodService() {
     }
 
     private fun textBeforeCursor(): String = currentInputConnection
-        ?.getTextBeforeCursor(200, 0)
+        ?.getTextBeforeCursor(240, 0)
         ?.toString()
         .orEmpty()
 

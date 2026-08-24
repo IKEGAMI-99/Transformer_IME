@@ -7,14 +7,10 @@ import java.io.FileOutputStream
 import kotlin.math.max
 
 /**
- * Dual-model Zenzai cascade.
+ * v0.9 single-model Zenzai runtime.
  *
- * Primary:  zenz-v3.2-small Q5_K_M (~95.1M params)
- * Fallback: zenz-v3.1-small Q5_K_M (~95.1M params)
- *
- * v0.8.2 over-generates neural branches and guarantees three distinct AI-assisted slots whenever
- * the converter has at least three useful alternatives. Invalid/duplicate neural continuations
- * are discarded; missing slots are filled with Mozc drafts closest to the neural hypothesis.
+ * We keep only zenz-v3.2-small (~95.1M) and spend the saved memory/package size on more decoding
+ * branches. One strong model thinking more times was more useful here than two near-identical models.
  */
 class Zenzai190MEngine(private val context: Context) {
     data class Generation(
@@ -54,22 +50,16 @@ class Zenzai190MEngine(private val context: Context) {
     fun initialize(): Boolean {
         if (!ZenzaiNative.ensureLoaded()) return false
         val primary = materializeAsset(PRIMARY_ASSET)
-        val fallback = materializeAsset(FALLBACK_ASSET)
         val p = ZenzaiNative.nativeLoadModel(0, primary.absolutePath)
         primaryReady = p > 80_000_000L
-        val f = ZenzaiNative.nativeLoadModel(1, fallback.absolutePath)
-        fallbackReady = f > 80_000_000L
-        totalParameters = p.coerceAtLeast(0) + f.coerceAtLeast(0)
+        fallbackReady = false
+        totalParameters = p.coerceAtLeast(0)
         return primaryReady
     }
 
     /**
-     * Kana -> kanji conversion with three visible AI-assisted hypotheses.
-     *
-     * We ask the primary model for more branches than we need because early-token alternatives
-     * often collapse into the same final surface or terminate in an invalid control token. After
-     * sanitising and de-duplicating, up to three neural surfaces are kept. If fewer survive, Mozc
-     * drafts most compatible with the primary neural surface fill the remaining visible AI slots.
+     * Produces three visible AI-assisted choices while placing the raw reading immediately after AI1.
+     * Result order is therefore: AI1 / raw reading / AI2 / AI3 / normal Mozc alternatives.
      */
     fun rerankConversion(
         leftContext: String,
@@ -80,103 +70,68 @@ class Zenzai190MEngine(private val context: Context) {
         val prompt = ZenzaiPrompt.conversion(leftContext, reading)
         val maxTokens = (reading.length * 2 + 8).coerceIn(8, 48)
         val primary = generateCandidates(0, prompt, maxTokens, CONVERSION_BRANCHES)
-        val primaryTexts = primary.items
+        val neural = primary.items
             .map { sanitizeConversion(it.text, reading.length) }
             .filter { it.isNotBlank() }
             .distinct()
-        val primaryMargin = primary.items.firstOrNull()?.margin ?: 0f
-
-        val needsSecondOpinion = fallbackReady &&
-            (primaryTexts.size < AI_CONVERSION_COUNT || primaryMargin < WEAK_MARGIN)
-        val fallback = if (needsSecondOpinion) {
-            generateCandidates(1, prompt, maxTokens, FALLBACK_BRANCHES)
-        } else null
-        val fallbackTexts = fallback?.items.orEmpty()
-            .map { sanitizeConversion(it.text, reading.length) }
-            .filter { it.isNotBlank() }
-            .distinct()
-
-        val neural = (primaryTexts + fallbackTexts)
-            .filter { it.isNotBlank() }
-            .distinct()
-
-        if (neural.isEmpty()) {
-            return RankResult(
-                candidates = drafts.distinct(),
-                latencyMs = primary.latencyMs + (fallback?.latencyMs ?: 0L),
-                usedFallback = fallback != null,
-                generated = "",
-                confidenceMargin = primaryMargin
-            )
-        }
+        val margin = primary.items.firstOrNull()?.margin ?: 0f
 
         val aiSlots = fillAiSlots(neural, drafts, AI_CONVERSION_COUNT)
-        val ranked = (aiSlots + drafts + neural)
-            .filter { it.isNotBlank() }
-            .distinct()
+        if (aiSlots.isEmpty()) {
+            val fallback = (listOf(reading) + drafts).filter { it.isNotBlank() }.distinct()
+            return RankResult(fallback, primary.latencyMs, false, "", margin)
+        }
+
+        val visible = buildList {
+            add(aiSlots[0])
+            add(reading)
+            aiSlots.drop(1).forEach(::add)
+            drafts.forEach(::add)
+            neural.forEach(::add)
+        }.filter { it.isNotBlank() }.distinct()
 
         return RankResult(
-            candidates = ranked,
-            latencyMs = primary.latencyMs + (fallback?.latencyMs ?: 0L),
-            usedFallback = fallback != null,
-            generated = neural.first(),
-            confidenceMargin = primaryMargin
+            candidates = visible,
+            latencyMs = primary.latencyMs,
+            usedFallback = false,
+            generated = neural.firstOrNull().orEmpty(),
+            confidenceMargin = margin
         )
     }
 
     /**
-     * Post-commit prediction.
-     *
-     * Zenzai predicts several possible *next kana readings* from the committed context. Each
-     * reading is independently expanded through the normal Mozc converter. We interleave the
-     * best surface from each reading before taking second choices, which prevents one ambiguous
-     * reading from monopolising the candidate row.
+     * Predict many possible next readings from the same model, expand each through Mozc, then
+     * interleave surfaces so one ambiguous reading does not monopolize the row.
      */
     fun predictNext(leftContext: String, fallbackPool: List<String>): NextResult {
         if (!primaryReady || leftContext.isBlank()) return NextResult(fallbackPool, 0, false, "")
         val prompt = ZenzaiPrompt.inputPrediction(leftContext)
-        val primary = generateCandidates(0, prompt, NEXT_MAX_TOKENS, NEXT_PRIMARY_BRANCHES)
-        val primaryReadings = primary.items
+        val primary = generateCandidates(0, prompt, NEXT_MAX_TOKENS, NEXT_BRANCHES)
+        val readings = primary.items
             .map { sanitizePredictedReading(it.text) }
-            .filter { it.length >= 1 }
-            .distinct()
-        val primaryMargin = primary.items.firstOrNull()?.margin ?: 0f
-
-        val shouldFallback = fallbackReady &&
-            (primaryReadings.size < MIN_NEXT_READINGS || primaryMargin < WEAK_MARGIN)
-        val fallback = if (shouldFallback) {
-            generateCandidates(1, prompt, NEXT_MAX_TOKENS, NEXT_FALLBACK_BRANCHES)
-        } else null
-        val fallbackReadings = fallback?.items.orEmpty()
-            .map { sanitizePredictedReading(it.text) }
-            .filter { it.length >= 1 }
-            .distinct()
-
-        val readings = (primaryReadings + fallbackReadings)
+            .filter { it.isNotBlank() }
             .distinct()
             .take(MAX_NEXT_READINGS)
 
         val expanded = readings.map { reading ->
-            CandidateGenerator.candidates(reading, limit = 6)
+            CandidateGenerator.candidates(reading, limit = 8)
                 .filter { it.isNotBlank() }
                 .distinct()
         }
 
         val neuralCandidates = LinkedHashSet<String>()
-        expanded.forEach { list -> list.firstOrNull()?.let(neuralCandidates::add) }
-        for (rank in 1 until 4) {
+        for (rank in 0 until 5) {
             expanded.forEach { list -> list.getOrNull(rank)?.let(neuralCandidates::add) }
         }
-
         val merged = (neuralCandidates + fallbackPool)
             .filter { it.isNotBlank() }
             .distinct()
-            .take(12)
+            .take(16)
 
         return NextResult(
             candidates = merged,
-            latencyMs = primary.latencyMs + (fallback?.latencyMs ?: 0L),
-            usedFallback = fallback != null,
+            latencyMs = primary.latencyMs,
+            usedFallback = false,
             predictedReading = readings.firstOrNull().orEmpty()
         )
     }
@@ -187,22 +142,7 @@ class Zenzai190MEngine(private val context: Context) {
         fallbackReady = false
     }
 
-    private fun generate(index: Int, prompt: String, maxTokens: Int): Generation {
-        val raw = ZenzaiNative.nativeGenerate(index, prompt, maxTokens)
-        return Generation(
-            text = raw.getOrNull(0).orEmpty(),
-            latencyMs = raw.getOrNull(1)?.toLongOrNull() ?: 0L,
-            margin = raw.getOrNull(2)?.toFloatOrNull() ?: 0f,
-            modelIndex = index
-        )
-    }
-
-    private fun generateCandidates(
-        index: Int,
-        prompt: String,
-        maxTokens: Int,
-        branches: Int
-    ): GenerationBatch {
+    private fun generateCandidates(index: Int, prompt: String, maxTokens: Int, branches: Int): GenerationBatch {
         val raw = ZenzaiNative.nativeGenerateCandidates(index, prompt, maxTokens, branches)
         if (raw.isEmpty()) return GenerationBatch(emptyList(), 0L)
         val latency = raw[0].toLongOrNull() ?: 0L
@@ -211,16 +151,7 @@ class Zenzai190MEngine(private val context: Context) {
             while (pos + 1 < raw.size) {
                 val text = raw[pos]
                 val margin = raw[pos + 1].toFloatOrNull() ?: 0f
-                if (text.isNotBlank()) {
-                    add(
-                        Generation(
-                            text = text,
-                            latencyMs = latency,
-                            margin = margin,
-                            modelIndex = index
-                        )
-                    )
-                }
+                if (text.isNotBlank()) add(Generation(text, latency, margin, index))
                 pos += 2
             }
         }
@@ -250,17 +181,12 @@ class Zenzai190MEngine(private val context: Context) {
 
     companion object {
         const val PRIMARY_ASSET = "zenz-v3.2-small-Q5_K_M.gguf"
-        const val FALLBACK_ASSET = "zenz-v3.1-small-Q5_K_M.gguf"
         private const val STRONG_MARGIN = 1.35f
-        private const val WEAK_MARGIN = 0.65f
         private const val AI_CONVERSION_COUNT = 3
-        private const val CONVERSION_BRANCHES = 5
-        private const val FALLBACK_BRANCHES = 4
-        private const val NEXT_PRIMARY_BRANCHES = 5
-        private const val NEXT_FALLBACK_BRANCHES = 4
-        private const val MIN_NEXT_READINGS = 3
-        private const val MAX_NEXT_READINGS = 6
-        private const val NEXT_MAX_TOKENS = 18
+        private const val CONVERSION_BRANCHES = 10
+        private const val NEXT_BRANCHES = 12
+        private const val MAX_NEXT_READINGS = 10
+        private const val NEXT_MAX_TOKENS = 20
 
         internal fun sanitizeConversion(raw: String, readingLength: Int): String {
             val clean = raw
@@ -273,7 +199,7 @@ class Zenzai190MEngine(private val context: Context) {
         internal fun sanitizePredictedReading(raw: String): String {
             val clipped = raw.takeWhile {
                 it !in '\uE000'..'\uF8FF' && it !in setOf('、', '。', '！', '？', '\n', '\r')
-            }.trim().take(24)
+            }.trim().take(28)
             return clipped.map { ch ->
                 if (ch in 'ァ'..'ヶ') (ch.code - 0x60).toChar() else ch
             }.joinToString("")
@@ -287,9 +213,7 @@ class Zenzai190MEngine(private val context: Context) {
         ): List<String> {
             if (count <= 0) return emptyList()
             val result = LinkedHashSet<String>()
-            neural.filter { it.isNotBlank() }.forEach {
-                if (result.size < count) result += it
-            }
+            neural.filter { it.isNotBlank() }.forEach { if (result.size < count) result += it }
             if (result.size >= count) return result.take(count)
 
             val reference = neural.firstOrNull().orEmpty()
@@ -297,21 +221,14 @@ class Zenzai190MEngine(private val context: Context) {
                 .filter { it.isNotBlank() && it !in result }
                 .distinct()
                 .mapIndexed { index, draft -> index to draft }
-            val ordered = if (reference.isBlank()) {
-                indexedDrafts
-            } else {
-                indexedDrafts.sortedWith(
-                    compareByDescending<Pair<Int, String>> { commonPrefixLength(it.second, reference) }
-                        .thenBy { it.first }
-                )
-            }
-            ordered.forEach { (_, draft) ->
-                if (result.size < count) result += draft
-            }
+            val ordered = if (reference.isBlank()) indexedDrafts else indexedDrafts.sortedWith(
+                compareByDescending<Pair<Int, String>> { commonPrefixLength(it.second, reference) }
+                    .thenBy { it.first }
+            )
+            ordered.forEach { (_, draft) -> if (result.size < count) result += draft }
             return result.take(count)
         }
 
-        /** Retained for unit tests and backwards-compatible speculative ranking behaviour. */
         internal fun mergeSpeculativeDrafts(
             drafts: List<String>,
             primary: String,
@@ -320,16 +237,9 @@ class Zenzai190MEngine(private val context: Context) {
         ): List<String> {
             if (primary.isBlank()) return drafts.distinct()
             val base = drafts.distinct()
-            if (primary == base.firstOrNull() || primary in base) {
-                return (listOf(primary) + base).distinct()
-            }
-            if (fallback.isNotBlank() && fallback == primary) {
-                return (listOf(primary) + base).distinct()
-            }
-            if (fallback.isNotBlank() && fallback in base) {
-                return (listOf(fallback, primary) + base).distinct()
-            }
-
+            if (primary == base.firstOrNull() || primary in base) return (listOf(primary) + base).distinct()
+            if (fallback.isNotBlank() && fallback == primary) return (listOf(primary) + base).distinct()
+            if (fallback.isNotBlank() && fallback in base) return (listOf(fallback, primary) + base).distinct()
             val constrainedDraft = base.maxByOrNull { commonPrefixLength(it, primary) }
             val prefixLength = constrainedDraft?.let { commonPrefixLength(it, primary) } ?: 0
             return when {
@@ -352,13 +262,11 @@ internal object ZenzaiPrompt {
     private const val INPUT_TAG = '\uEE00'
     private const val OUTPUT_TAG = '\uEE01'
     private const val CONTEXT_TAG = '\uEE02'
-    private const val CONTEXT_CHARS = 96
+    private const val CONTEXT_CHARS = 128
 
     fun conversion(leftContext: String, reading: String): String {
         val context = leftContext.takeLast(CONTEXT_CHARS)
-        val kata = reading.map { ch ->
-            if (ch in 'ぁ'..'ゖ') (ch.code + 0x60).toChar() else ch
-        }.joinToString("")
+        val kata = reading.map { ch -> if (ch in 'ぁ'..'ゖ') (ch.code + 0x60).toChar() else ch }.joinToString("")
         return buildString {
             if (context.isNotEmpty()) append(CONTEXT_TAG).append(context)
             append(INPUT_TAG).append(kata).append(OUTPUT_TAG)

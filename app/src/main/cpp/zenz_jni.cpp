@@ -29,14 +29,8 @@ struct Engine {
     uint64_t params = 0;
 
     void clear() {
-        if (ctx) {
-            llama_free(ctx);
-            ctx = nullptr;
-        }
-        if (model) {
-            llama_model_free(model);
-            model = nullptr;
-        }
+        if (ctx) { llama_free(ctx); ctx = nullptr; }
+        if (model) { llama_model_free(model); model = nullptr; }
         vocab = nullptr;
         params = 0;
         last_margin = 0.0f;
@@ -64,27 +58,13 @@ std::vector<llama_token> tokenize(const Engine & e, const std::string & text, bo
     if (!e.vocab) return {};
     int32_t capacity = std::max<int32_t>(32, static_cast<int32_t>(text.size()) + 16);
     std::vector<llama_token> result(capacity);
-    int32_t count = llama_tokenize(
-        e.vocab,
-        text.c_str(),
-        static_cast<int32_t>(text.size()),
-        result.data(),
-        capacity,
-        add_special,
-        true
-    );
+    int32_t count = llama_tokenize(e.vocab, text.c_str(), static_cast<int32_t>(text.size()),
+                                   result.data(), capacity, add_special, true);
     if (count < 0) {
         capacity = -count;
         result.resize(capacity);
-        count = llama_tokenize(
-            e.vocab,
-            text.c_str(),
-            static_cast<int32_t>(text.size()),
-            result.data(),
-            capacity,
-            add_special,
-            true
-        );
+        count = llama_tokenize(e.vocab, text.c_str(), static_cast<int32_t>(text.size()),
+                               result.data(), capacity, add_special, true);
     }
     if (count <= 0) return {};
     result.resize(count);
@@ -118,10 +98,8 @@ struct GenerationSet {
 
 bool decode_prompt(Engine & e, const std::vector<llama_token> & prompt_tokens) {
     if (prompt_tokens.empty()) return false;
-    llama_batch batch = llama_batch_get_one(
-        const_cast<llama_token *>(prompt_tokens.data()),
-        static_cast<int32_t>(prompt_tokens.size())
-    );
+    llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(prompt_tokens.data()),
+                                            static_cast<int32_t>(prompt_tokens.size()));
     if (llama_decode(e.ctx, batch) != 0) {
         LOGE("prompt decode failed");
         return false;
@@ -129,27 +107,18 @@ bool decode_prompt(Engine & e, const std::vector<llama_token> & prompt_tokens) {
     return true;
 }
 
-std::vector<TokenScore> top_tokens(
-    const Engine & e,
-    float * logits,
-    int count,
-    bool exclude_eog
-) {
+std::vector<TokenScore> top_tokens(const Engine & e, float * logits, int count, bool exclude_eog) {
     std::vector<TokenScore> top;
     if (!logits || !e.vocab || count <= 0) return top;
     const int32_t n_vocab = llama_vocab_n_tokens(e.vocab);
     top.reserve(static_cast<size_t>(count));
-
     for (int32_t id = 0; id < n_vocab; ++id) {
         const llama_token token = static_cast<llama_token>(id);
         if (exclude_eog && llama_vocab_is_eog(e.vocab, token)) continue;
         const float value = logits[id];
         if (!std::isfinite(value)) continue;
-
-        auto it = std::lower_bound(
-            top.begin(), top.end(), value,
-            [](const TokenScore & item, float v) { return item.logit > v; }
-        );
+        auto it = std::lower_bound(top.begin(), top.end(), value,
+                                   [](const TokenScore & item, float v) { return item.logit > v; });
         if (static_cast<int>(top.size()) < count || it != top.end()) {
             top.insert(it, TokenScore{token, value});
             if (static_cast<int>(top.size()) > count) top.pop_back();
@@ -158,23 +127,16 @@ std::vector<TokenScore> top_tokens(
     return top;
 }
 
-Generation continue_branch(
-    Engine & e,
-    llama_token first_token,
-    int max_tokens,
-    float initial_margin
-) {
+Generation continue_branch(Engine & e, llama_token first_token, int max_tokens, float initial_margin) {
     Generation out;
     const auto started = std::chrono::steady_clock::now();
     if (max_tokens <= 0 || llama_vocab_is_eog(e.vocab, first_token)) return out;
-
     const std::string first_piece = token_piece(e, first_token);
     if (first_piece.empty()) return out;
     out.text += first_piece;
 
     float margin_sum = std::max(0.0f, initial_margin);
     int margin_count = initial_margin > 0.0f ? 1 : 0;
-
     llama_token next = first_token;
     llama_batch first_batch = llama_batch_get_one(&next, 1);
     if (llama_decode(e.ctx, first_batch) != 0) {
@@ -187,18 +149,15 @@ Generation continue_branch(
         if (!logits) break;
         const auto best = top_tokens(e, logits, 2, false);
         if (best.empty()) break;
-
         if (best.size() > 1) {
             margin_sum += best[0].logit - best[1].logit;
             margin_count++;
         }
-
         const llama_token token = best[0].token;
         if (llama_vocab_is_eog(e.vocab, token)) break;
         const std::string piece = token_piece(e, token);
         if (piece.empty()) break;
         out.text += piece;
-
         llama_token greedy = token;
         llama_batch next_batch = llama_batch_get_one(&greedy, 1);
         if (llama_decode(e.ctx, next_batch) != 0) {
@@ -225,9 +184,7 @@ GenerationSet multi_generate(Engine & e, const std::string & prompt, int max_tok
     const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(e.ctx));
     if (static_cast<int32_t>(prompt_tokens.size()) + max_tokens + 2 >= n_ctx) {
         const size_t keep = std::max<size_t>(1, n_ctx - max_tokens - 4);
-        if (prompt_tokens.size() > keep) {
-            prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.end() - keep);
-        }
+        if (prompt_tokens.size() > keep) prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.end() - keep);
     }
 
     if (!decode_prompt(e, prompt_tokens)) {
@@ -236,7 +193,7 @@ GenerationSet multi_generate(Engine & e, const std::string & prompt, int max_tok
     }
 
     float * first_logits = llama_get_logits_ith(e.ctx, -1);
-    const auto first_choices = top_tokens(e, first_logits, std::clamp(branches, 1, 5), true);
+    const auto first_choices = top_tokens(e, first_logits, std::clamp(branches, 1, 12), true);
     if (first_choices.empty()) {
         llama_kv_cache_clear(e.ctx);
         return result;
@@ -254,12 +211,7 @@ GenerationSet multi_generate(Engine & e, const std::string & prompt, int max_tok
         } else if (i + 1 < first_choices.size()) {
             initial_margin = std::max(0.0f, first_choices[i].logit - first_choices[i + 1].logit);
         }
-        Generation branch = continue_branch(
-            e,
-            first_choices[i].token,
-            max_tokens,
-            initial_margin
-        );
+        Generation branch = continue_branch(e, first_choices[i].token, max_tokens, initial_margin);
         if (!branch.text.empty()) result.items.push_back(std::move(branch));
     }
 
@@ -301,8 +253,7 @@ Java_com_ikegami_transformerime_model_ZenzaiNative_nativeInit(JNIEnv *, jobject)
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_ikegami_transformerime_model_ZenzaiNative_nativeLoadModel(
-    JNIEnv * env, jobject, jint index, jstring jpath) {
+Java_com_ikegami_transformerime_model_ZenzaiNative_nativeLoadModel(JNIEnv * env, jobject, jint index, jstring jpath) {
     ensure_backend();
     if (index < 0 || index > 1 || !jpath) return 0;
     Engine & e = g_engines[index];
@@ -341,8 +292,7 @@ Java_com_ikegami_transformerime_model_ZenzaiNative_nativeLoadModel(
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
-Java_com_ikegami_transformerime_model_ZenzaiNative_nativeGenerate(
-    JNIEnv * env, jobject, jint index, jstring jprompt, jint max_tokens) {
+Java_com_ikegami_transformerime_model_ZenzaiNative_nativeGenerate(JNIEnv * env, jobject, jint index, jstring jprompt, jint max_tokens) {
     if (index < 0 || index > 1 || !jprompt) return make_generation_result(env, {});
     Engine & e = g_engines[index];
     std::lock_guard<std::mutex> guard(e.mutex);
@@ -356,26 +306,20 @@ Java_com_ikegami_transformerime_model_ZenzaiNative_nativeGenerate(
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
-Java_com_ikegami_transformerime_model_ZenzaiNative_nativeGenerateCandidates(
-    JNIEnv * env, jobject, jint index, jstring jprompt, jint max_tokens, jint branches) {
+Java_com_ikegami_transformerime_model_ZenzaiNative_nativeGenerateCandidates(JNIEnv * env, jobject, jint index, jstring jprompt, jint max_tokens, jint branches) {
     if (index < 0 || index > 1 || !jprompt) return make_generation_set_result(env, {});
     Engine & e = g_engines[index];
     std::lock_guard<std::mutex> guard(e.mutex);
     const char * chars = env->GetStringUTFChars(jprompt, nullptr);
     std::string prompt(chars);
     env->ReleaseStringUTFChars(jprompt, chars);
-    const GenerationSet result = multi_generate(
-        e,
-        prompt,
-        std::clamp<int>(max_tokens, 1, 64),
-        std::clamp<int>(branches, 1, 5)
-    );
+    const GenerationSet result = multi_generate(e, prompt,
+        std::clamp<int>(max_tokens, 1, 64), std::clamp<int>(branches, 1, 12));
     return make_generation_set_result(env, result);
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_ikegami_transformerime_model_ZenzaiNative_nativeParameterCount(
-    JNIEnv *, jobject, jint index) {
+Java_com_ikegami_transformerime_model_ZenzaiNative_nativeParameterCount(JNIEnv *, jobject, jint index) {
     if (index < 0 || index > 1) return 0;
     return static_cast<jlong>(g_engines[index].params);
 }
