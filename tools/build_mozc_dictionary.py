@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Build a compact on-device kana->surface SQLite dictionary from Mozc OSS data."""
+"""Build a compact on-device kana->surface SQLite dictionary from Mozc OSS data.
+
+v0.6 also builds a compact prefix-completion table.  This lets the IME suggest a
+longer conversion before the user has finished typing its full reading, e.g.
+「うめ」 -> 「梅田」.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +24,7 @@ MANUAL_FILES = ["dictionary_manual/places.tsv", "dictionary_manual/words.tsv"]
 
 
 def download(url: str, path: Path) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": "Transformer-IME-dictionary-builder/0.4"})
+    request = urllib.request.Request(url, headers={"User-Agent": "Transformer-IME-dictionary-builder/0.6"})
     with urllib.request.urlopen(request, timeout=120) as response, path.open("wb") as out:
         while True:
             chunk = response.read(1024 * 1024)
@@ -29,8 +34,6 @@ def download(url: str, path: Path) -> None:
 
 
 def normalize_reading(text: str) -> str:
-    # Mozc keys are mostly hiragana already. Normalize katakana just in case a supplemental entry
-    # uses it, while preserving ASCII prefixes found in a few technical proper nouns.
     chars = []
     for ch in text.strip():
         code = ord(ch)
@@ -90,6 +93,19 @@ def parse_manual(path: Path, entries: dict[str, dict[str, int]], preferred_cost:
     return count
 
 
+def keep_prefix_candidate(
+    bucket: dict[str, tuple[int, str]], surface: str, score: int, reading: str, max_candidates: int
+) -> None:
+    old = bucket.get(surface)
+    if old is None or score < old[0]:
+        bucket[surface] = (score, reading)
+    # Bound memory while processing the ~750k-reading Mozc dictionary.
+    if len(bucket) > max_candidates * 3:
+        trimmed = sorted(bucket.items(), key=lambda item: (item[1][0], len(item[0]), item[0]))[: max_candidates * 2]
+        bucket.clear()
+        bucket.update(trimmed)
+
+
 def build_database(output: Path, entries: dict[str, dict[str, int]], max_candidates: int) -> dict:
     if output.exists():
         output.unlink()
@@ -109,11 +125,22 @@ def build_database(output: Path, entries: dict[str, dict[str, int]], max_candida
             cost INTEGER NOT NULL,
             PRIMARY KEY(reading, cost, surface)
         ) WITHOUT ROWID;
+        CREATE TABLE predictions(
+            prefix TEXT NOT NULL,
+            reading TEXT NOT NULL,
+            surface TEXT NOT NULL,
+            cost INTEGER NOT NULL,
+            PRIMARY KEY(prefix, cost, surface, reading)
+        ) WITHOUT ROWID;
         """
     )
 
     written = 0
     batch = []
+    # Prefix completion is intentionally capped.  We keep two strong surfaces per full reading,
+    # and only prefixes of 2..7 kana.  That gives useful completion without making the APK huge.
+    prefix_map: dict[str, dict[str, tuple[int, str]]] = defaultdict(dict)
+
     for reading in sorted(entries):
         ranked = sorted(entries[reading].items(), key=lambda item: (item[1], len(item[0]), item[0]))
         for surface, cost in ranked[:max_candidates]:
@@ -122,37 +149,64 @@ def build_database(output: Path, entries: dict[str, dict[str, int]], max_candida
             if len(batch) >= 20_000:
                 conn.executemany("INSERT INTO entries(reading,surface,cost) VALUES(?,?,?)", batch)
                 batch.clear()
+
+        if len(reading) >= 3:
+            for alt_index, (surface, cost) in enumerate(ranked[:2]):
+                max_prefix = min(7, len(reading) - 1)
+                for prefix_len in range(2, max_prefix + 1):
+                    prefix = reading[:prefix_len]
+                    extension = len(reading) - prefix_len
+                    # Prefer normal Mozc cost, shorter completion distance and the first surface.
+                    predictive_cost = cost + extension * 95 + alt_index * 140
+                    keep_prefix_candidate(prefix_map[prefix], surface, predictive_cost, reading, 8)
+
     if batch:
         conn.executemany("INSERT INTO entries(reading,surface,cost) VALUES(?,?,?)", batch)
 
+    predictive_written = 0
+    prediction_batch = []
+    for prefix in sorted(prefix_map):
+        ranked = sorted(
+            prefix_map[prefix].items(),
+            key=lambda item: (item[1][0], len(item[1][1]), len(item[0]), item[0]),
+        )[:8]
+        for surface, (cost, reading) in ranked:
+            prediction_batch.append((prefix, reading, surface, cost))
+            predictive_written += 1
+            if len(prediction_batch) >= 20_000:
+                conn.executemany(
+                    "INSERT INTO predictions(prefix,reading,surface,cost) VALUES(?,?,?,?)", prediction_batch
+                )
+                prediction_batch.clear()
+    if prediction_batch:
+        conn.executemany("INSERT INTO predictions(prefix,reading,surface,cost) VALUES(?,?,?,?)", prediction_batch)
+
     metadata = {
-        "format_version": "1",
+        "format_version": "2",
         "source": "Mozc OSS dictionary + Mozc dictionary_manual",
         "source_revision": MOZC_REV,
         "max_candidates_per_reading": str(max_candidates),
         "unique_readings": str(len(entries)),
         "entry_count": str(written),
+        "prediction_prefix_count": str(len(prefix_map)),
+        "prediction_entry_count": str(predictive_written),
     }
     conn.executemany("INSERT INTO metadata(key,value) VALUES(?,?)", metadata.items())
-    conn.execute("PRAGMA user_version=1")
+    conn.execute("PRAGMA user_version=2")
     conn.execute("ANALYZE")
     conn.commit()
     conn.execute("VACUUM")
     conn.close()
 
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
-    return {
-        **metadata,
-        "file_size": output.stat().st_size,
-        "sha256": digest,
-    }
+    return {**metadata, "file_size": output.stat().st_size, "sha256": digest}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--metadata", type=Path)
-    parser.add_argument("--max-candidates", type=int, default=8)
+    parser.add_argument("--max-candidates", type=int, default=12)
     args = parser.parse_args()
 
     entries: dict[str, dict[str, int]] = defaultdict(dict)
