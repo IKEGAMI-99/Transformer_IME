@@ -2,15 +2,15 @@
 
 Android向けの、**完全オンデバイスAI日本語IME**実験プロジェクトです。
 
-Mozc OSS辞書による高速なかな漢字変換を土台に、Zenzai v3.2-smallによるニューラル変換・文脈予測、端末内SQLiteを使ったPersonal RAG / 個人学習、英語入力予測、Audio Pulse UIを組み合わせています。
+Mozc OSS辞書による高速かな漢字変換を土台に、Zenzai v3.2-smallによるニューラル変換・文脈予測、端末内SQLiteを使ったPersonal RAG / 個人学習、英語入力予測、Audio Pulse UIを組み合わせています。
 
-**現在のバージョン: v0.10.2**
+**現在のバージョン: v0.10.3**
 
 ## APKダウンロード
 
-### v0.10.2
+### v0.10.3
 
-[📱 Transformer IME v0.10.2 APKをダウンロード](https://github.com/IKEGAMI-99/Transformer_IME/actions/runs/32726227402/artifacts/9519707673)
+[📱 Transformer IME v0.10.3 APKをダウンロード](https://github.com/IKEGAMI-99/Transformer_IME/actions/runs/32728401189/artifacts/9520505464)
 
 GitHub ActionsでZenzai実変換、source verification、unit test、Android NDK、APK生成まで検証済みのdebug APKです。
 
@@ -36,52 +36,82 @@ GitHub Actions artifactには保存期限があります。期限切れの場合
 - `123` から**4×4数字キーパッド**へ切替
 - Backspace長押し連続削除
 - **Audio Pulse**: 無音時は黒、音が入るとキー領域の下端から光が立ち上がる
-- 音量に応じて青 / シアン → 紫 → ピンク → オレンジへ変化
-- 通常キー面は透明で、背景グローを直接表示
+- 通常音量は青〜紫中心、ピンク〜オレンジは大きなピーク時のみ
+- Audio Pulseのリアルタイム値はプロセス内メモリで共有
+- Pulse背景の高さは実際のキーボード高さへ追従
+- 下部余白は実際のnavigation bar insetを使用し、固定44dp余白を廃止
+- 通常キー面は透明で背景グローを直接表示
 - パスワード欄ではAI・個人学習を停止
 - `INTERNET` permissionなし
 - 推論・学習・変換は端末内で完結
 
 ---
 
-## v0.10.2
+## v0.10.3
 
-v0.10.2は実機フィードバックをもとに、Audio Pulseのレイアウトと描画方式をもう一段作り直したバージョンです。
+v0.10.3は実機フィードバックをもとに、**Audio Pulseのダイナミックレンジ、安定性、キーボード下部余白**を改善したバージョンです。
 
-### Pulse領域を縮小
+### Audio Pulseのピークを高く
 
-v0.10.1ではPulse背景Viewがキー領域より大きく測定される端末があり、IME下側に大きな発光領域ができることがありました。
+v0.10.2では一般的な音楽でもピンク〜オレンジへ到達しやすかったため、v0.10.3では音量カーブを再調整しました。
 
-v0.10.2ではPulse背景を**最大320dpのキー領域**に制限しています。
+```text
+無音       黒
+小〜中音量 青 / シアン
+通常音量   シアン / 紫
+大音量     紫 / ピンク
+強いピーク ピンク / オレンジ
+```
+
+RMSはdBスケールへ変換し、peak値と組み合わせたあと非線形カーブを通します。描画側でもオレンジはvisual energyの上端付近に限定しています。
+
+---
+
+## Audio Pulseの安定性改善
+
+v0.10.2ではAudioRecordの各バッファ処理ごとにSharedPreferencesへレベルを書き込み、IME側が繰り返し読み出していました。
+
+v0.10.3では `AudioPulseState` を追加し、サービスとIME間のライブ音量を**プロセス内メモリだけで共有**します。
+
+```text
+AudioPlaybackCapture
+        ↓
+AudioRecord
+        ↓
+RMS + instantaneous peak
+        ↓
+AudioPulseState.level
+        ↓
+IME AudioPulseBackgroundView
+```
+
+これによりリアルタイム処理中の不要なPreference I/Oを削除しています。
+
+さらにAudioRecordの生成・録音開始失敗を検出し、失敗時はPulse状態をリセットして安全に停止します。
+
+IME側のPulse更新も約30fpsから**25fps（40ms間隔）**へ下げ、表示品質を大きく落とさず描画負荷を軽減しています。
+
+---
+
+## 下部余白
+
+v0.10.2では44dpの固定minimum paddingがあり、一部端末でキーボード下部に大きな黒い余白ができていました。
+
+v0.10.3では固定44dpを廃止し、**実際のnavigation bar inset + 8dp minimum**を利用します。
+
+またAudio Pulse背景も固定320dpではなく、`keyboardContainer` の実測高さへ追従します。
 
 ```text
 候補バー
 ────────────
-キー領域       ← Audio Pulseはここだけ
+キー領域       ← Pulse Viewも同じ高さ
 キー領域
 キー領域
-ナビゲーション
+────────────
+必要最小限のnavigation inset
 ```
 
-発光Viewが画面下部全体へ伸びないようにしています。
-
-### 無音時は黒
-
-Audio Pulseが有効でも、入力音量がしきい値以下なら背景は完全な黒です。
-
-```text
-silence
-  ↓
-noise gate
-  ↓
-energy = 0
-  ↓
-BLACK
-```
-
-通常キーの黒い塗りも撤去し、キー面はほぼ透明です。
-
-そのため、無音時は黒いキーボード、音が入った時だけ背景の光がキー越しに見える構成になっています。
+端末ごとのgesture areaが大きくても、それをそのまま余白として追加しません。
 
 ---
 
@@ -99,7 +129,7 @@ PCM 16bit
 RMS → dB scale
 + instantaneous peak
       ↓
-noise gate
+noise gate / nonlinear curve
       ↓
 fast attack / slower decay
       ↓
@@ -107,51 +137,7 @@ bottom-up LinearGradient
 + bottom-center RadialGradient
 ```
 
-### 音量スケーリング
-
-v0.10.1の単純なRMS倍率では大きめの音で値が飽和しやすかったため、v0.10.2では**dBベース**に変更しました。
-
-小さい音と大きい音の差を残しやすくし、普通の音量ですぐオレンジまで到達しないようにしています。
-
-### 下から立ち上がるグラデーション
-
-背景全体を単色で塗るのではなく、音量に応じて発光の高さが変わります。
-
-```text
-静音      █ 黒
-小音量    █
-          ░ 青
-          ▓ シアン
-
-中音量    ░
-          ▒ 紫
-          ▓ ピンク
-
-大音量    ░
-          ▒ ピンク
-          █ オレンジ / 白いピーク
-          ↑ 下端光源
-```
-
-LinearGradientに加えて、画面下側の外に光源があるように見せるRadialGradientを重ねています。
-
-### 鼓動
-
-RMSだけでなく瞬間ピークも監視しています。
-
-急激な音量上昇ではbeat envelopeを生成して、短時間だけ発光を強くし、その後少しゆっくり減衰します。
-
-色変化:
-
-```text
-小音量   青 / シアン
-   ↓
-中音量   紫 / バイオレット
-   ↓
-大音量   ピンク / マゼンタ
-   ↓
-ピーク   オレンジ寄り
-```
+無音時は黒で、通常キー面は透明です。音が入ったときだけ背景の光がキー越しに見えます。
 
 音声そのものは保存しません。
 
@@ -168,9 +154,7 @@ RMSだけでなく瞬間ピークも監視しています。
 
 ## 数字キーパッド
 
-v0.10.0の扇状数字ポップアップは廃止済みです。
-
-日本語フリック右側の `123` を押すと、そのまま独立した4×4数字キーパッドへ切り替わります。
+日本語フリック右側の `123` を押すと、独立した4×4数字キーパッドへ切り替わります。
 
 ```text
 1    2    3    ⌫
@@ -216,9 +200,7 @@ prefix indexも持つため、読みを最後まで入力する前から候補�
 - Q5_K_M
 - Apache-2.0
 
-v0.8系の2モデル構成は廃止し、現在はZenzai v3.2-smallを1モデルだけ搭載しています。
-
-その代わり、同一入力に対して最大10分岐を試します。
+Zenzai v3.2-smallを1モデル搭載し、同一入力に対して最大10分岐を試します。
 
 ```text
 左文脈 + 読み
@@ -269,9 +251,7 @@ Zenzai rerank
 
 頻度と最終使用時刻を使って順位を調整します。
 
-アプリ本体の `学習内容を表示` から内容・回数・最終使用時刻を確認できます。
-
-`学習内容をすべて削除` でローカル学習DBをリセットできます。
+アプリ本体の `学習内容を表示` から内容・回数・最終使用時刻を確認できます。`学習内容をすべて削除` でローカル学習DBをリセットできます。
 
 ---
 
@@ -335,31 +315,42 @@ CIでは以下を自動検証します。
 5. Zenzai実かな漢字変換 smoke test
 6. Zenzai 95M ×10構成
 7. 4×4数字キーパッド
-8. Pulse背景の320dp制限
-9. 通常キーが透明であること
-10. Bottom-up LinearGradient / RadialGradient
-11. Audio PulseのdBベースRMS処理
-12. silence gate
-13. instantaneous peak / beat envelope
-14. Kotlin unit tests
-15. Android NDK / arm64 build
-16. APK内の単一GGUF + `libzenzjni.so`
-17. APK artifact upload
+8. Process-local AudioPulseState
+9. SharedPreferences hot-path書き込みがないこと
+10. AudioRecord start failure guard
+11. Pulse polling 40ms
+12. 実測keyboard heightへのPulse View追従
+13. compact navigation inset
+14. Bottom-up LinearGradient / RadialGradient
+15. 高いcolour headroom
+16. Kotlin unit tests
+17. Android NDK / arm64 build
+18. APK内の単一GGUF + `libzenzjni.so`
+19. APK artifact upload
 
 ---
 
 ## バージョン履歴
 
+### v0.10.3
+
+- Audio Pulseのピーク天井を引き上げ
+- オレンジを上端ピーク付近に限定
+- Process-local `AudioPulseState` を追加
+- Audio Pulse hot pathからSharedPreferences I/Oを削除
+- AudioRecord失敗時の安全停止を強化
+- Pulse pollingを25fpsへ軽量化
+- 固定44dp bottom paddingを廃止
+- navigation bar inset + 8dp minimumへ変更
+- Pulse背景を実測keyboard heightへ追従
+
 ### v0.10.2
 
-- Audio Pulse背景を最大320dpへ制限
-- 無音時を完全な黒へ
+- 無音時を黒へ
 - 通常キー面を透明化
 - 下端光源のLinearGradient + RadialGradient
 - RMSのdBスケーリング
 - silence gate追加
-- 音量色変化のダイナミックレンジ改善
-- Zenzai 95M ×10 / Personal RAGは維持
 
 ### v0.10.1
 
@@ -367,8 +358,6 @@ CIでは以下を自動検証します。
 - `123` → 4×4数字キーパッド
 - Audio Pulseをキー領域限定へ変更
 - RMS + instantaneous peak
-- beat envelope強化
-- 音量による青→紫→ピンク→オレンジ色変化
 
 ### v0.10.0
 
@@ -378,7 +367,6 @@ CIでは以下を自動検証します。
 - 英語QWERTY候補
 - Audio Pulse初版
 - 絵文字パネル
-- 数字 / 記号パネル
 - Backspace長押し連続削除
 
 ### v0.9.x
