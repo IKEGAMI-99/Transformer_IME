@@ -50,7 +50,6 @@ jobs:
           predicted = [r[0] for r in db.execute("SELECT surface FROM predictions WHERE prefix=? ORDER BY cost", ('うめ',))]
           assert '梅田' in exact, exact
           assert '梅田' in predicted, predicted
-          print('Mozc verified:', exact[:6], '/', predicted[:8])
           db.close()
           PY
 
@@ -82,63 +81,52 @@ jobs:
       - name: Verify context prediction DB
         run: |
           python - <<'PY'
-          import json, sqlite3
+          import json
           from pathlib import Path
-          path = Path('app/src/main/assets/context_predictions.db')
           info = json.loads(Path('app/src/main/assets/context_predictions.meta.json').read_text(encoding='utf-8'))
-          assert path.exists() and path.stat().st_size > 100_000
           assert int(info['unique_contexts']) > 1000, info
           assert int(info['prediction_entries']) > 5000, info
-          print('Context DB verified:', info['unique_contexts'], 'contexts')
           PY
 
-      - name: Restore Zenzai Q5 models
+      - name: Restore Zenzai v3.2 Q5 model
         id: zenz-cache
         uses: actions/cache@v4
         with:
           path: |
             app/src/main/assets/zenz-v3.2-small-Q5_K_M.gguf
-            app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf
-            app/src/main/assets/zenzai190.meta.json
-          key: zenzai-190m-v32-v31-q5km-1
+            app/src/main/assets/zenzai95.meta.json
+          key: zenzai-95m-v32-q5km-1
 
-      - name: Download Zenzai 190M cascade
+      - name: Download Zenzai 95M model
         if: steps.zenz-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p app/src/main/assets
           curl -L --fail --retry 5 --retry-delay 2 \
             'https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf/resolve/main/ggml-model-Q5_K_M.gguf?download=true' \
             -o app/src/main/assets/zenz-v3.2-small-Q5_K_M.gguf
-          curl -L --fail --retry 5 --retry-delay 2 \
-            'https://huggingface.co/Miwa-Keita/zenz-v3.1-small-gguf/resolve/main/ggml-model-Q5_K_M.gguf?download=true' \
-            -o app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf
 
-      - name: Verify Zenzai model files and write metadata
+      - name: Verify Zenzai model and write metadata
         run: |
           python - <<'PY'
           from pathlib import Path
           import hashlib, json
-          models = [
-              ('primary', Path('app/src/main/assets/zenz-v3.2-small-Q5_K_M.gguf'), '95.1M', 'Apache-2.0'),
-              ('fallback', Path('app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf'), '95.1M', 'CC BY-SA 4.0'),
-          ]
+          path = Path('app/src/main/assets/zenz-v3.2-small-Q5_K_M.gguf')
+          assert path.read_bytes()[:4] == b'GGUF'
+          assert path.stat().st_size > 65_000_000
           result = {
-              'version': '0.8.2',
-              'design': 'Zenzai over-branch + guaranteed 3 visible AI-assisted slots',
-              'estimated_total_parameters': 190_200_000,
+              'version': '0.9.0',
+              'design': 'single Zenzai v3.2 with 10-way conversion / 12-way next prediction + local user learning',
+              'estimated_total_parameters': 95_100_000,
               'quantization': 'Q5_K_M',
-              'models': []
+              'model': {
+                  'file': path.name,
+                  'parameters': '95.1M',
+                  'license': 'Apache-2.0',
+                  'file_size': path.stat().st_size,
+                  'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+              }
           }
-          for role, path, params, license_name in models:
-              data_head = path.read_bytes()[:4]
-              assert data_head == b'GGUF', (path, data_head)
-              assert path.stat().st_size > 65_000_000, path.stat().st_size
-              digest = hashlib.sha256(path.read_bytes()).hexdigest()
-              result['models'].append({
-                  'role': role, 'file': path.name, 'parameters': params,
-                  'license': license_name, 'file_size': path.stat().st_size, 'sha256': digest
-              })
-          Path('app/src/main/assets/zenzai190.meta.json').write_text(
+          Path('app/src/main/assets/zenzai95.meta.json').write_text(
               json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8'
           )
           print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -172,14 +160,14 @@ jobs:
           test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
-      - name: Verify v0.8.2 three visible AI slots
+      - name: Verify v0.9 architecture
         run: |
-          grep -q 'nativeGenerateCandidates' app/src/main/cpp/zenz_jni.cpp
-          grep -q 'AI_CONVERSION_COUNT = 3' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
-          grep -q 'CONVERSION_BRANCHES = 5' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
-          grep -q 'NEXT_PRIMARY_BRANCHES = 5' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
-          grep -q '✦AI1' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
-          grep -q 'aiCount = if (medium.corpusTrained) 3 else 1' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
+          grep -q 'CONVERSION_BRANCHES = 10' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
+          grep -q 'NEXT_BRANCHES = 12' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
+          grep -q 'std::clamp(branches, 1, 12)' app/src/main/cpp/zenz_jni.cpp
+          grep -q 'UserLearningStore' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
+          grep -q 'setOf(0, 2, 3)' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
+          test ! -f app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf
 
       - uses: actions/setup-java@v4
         with:
@@ -203,33 +191,34 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify APK contains dual GGUF and native runtime
+      - name: Verify APK contains single GGUF and native runtime
         run: |
           python - <<'PY'
           from pathlib import Path
           import zipfile
           apk = Path('app/build/outputs/apk/debug/app-debug.apk')
-          assert apk.exists() and apk.stat().st_size > 120_000_000, apk.stat().st_size
+          assert apk.exists() and apk.stat().st_size > 70_000_000, apk.stat().st_size
+          assert apk.stat().st_size < 140_000_000, apk.stat().st_size
           with zipfile.ZipFile(apk) as z:
               names = set(z.namelist())
               assert 'assets/zenz-v3.2-small-Q5_K_M.gguf' in names
-              assert 'assets/zenz-v3.1-small-Q5_K_M.gguf' in names
-              assert any(n.endswith('/libzenzjni.so') for n in names), [n for n in names if 'zenz' in n]
+              assert 'assets/zenz-v3.1-small-Q5_K_M.gguf' not in names
+              assert any(n.endswith('/libzenzjni.so') for n in names)
           print('APK verified:', apk.stat().st_size, 'bytes')
           PY
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.8.2-Zenzai190M-AI3-debug
+          name: Transformer-IME-v0.9.0-Zenzai95M-Learning-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.8.2 metadata
+      - name: Upload v0.9 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.8.2-metadata
+          name: Transformer-IME-v0.9.0-metadata
           path: |
-            app/src/main/assets/zenzai190.meta.json
+            app/src/main/assets/zenzai95.meta.json
             app/src/main/assets/mozc_compact.meta.json
             app/src/main/assets/context_predictions.meta.json
             THIRD_PARTY_MODELS.md
