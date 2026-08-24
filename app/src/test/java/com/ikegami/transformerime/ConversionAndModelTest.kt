@@ -29,6 +29,10 @@ class ConversionAndModelTest {
         assertEquals("お", FlickKana.output("あ", FlickDirection.DOWN))
         assertEquals("こ", FlickKana.output("か", FlickDirection.DOWN))
         assertEquals("ん", FlickKana.output("わ", FlickDirection.UP))
+        assertEquals("ゆ", FlickKana.output("や", FlickDirection.UP))
+        assertEquals("よ", FlickKana.output("や", FlickDirection.DOWN))
+        assertEquals("「", FlickKana.output("や", FlickDirection.LEFT))
+        assertEquals("」", FlickKana.output("や", FlickDirection.RIGHT))
     }
 
     @Test
