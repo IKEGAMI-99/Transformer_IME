@@ -36,13 +36,18 @@ class ConversionAndModelTest {
     }
 
     @Test
-    fun kanaModifierCyclesDakutenHandakutenAndSmallKana() {
+    fun kanaModifierPrioritizesSmallKanaBeforeDakuten() {
         assertEquals("が", FlickKana.modifyLast("か"))
         assertEquals("か", FlickKana.modifyLast("が"))
         assertEquals("ば", FlickKana.modifyLast("は"))
         assertEquals("ぱ", FlickKana.modifyLast("ば"))
         assertEquals("は", FlickKana.modifyLast("ぱ"))
-        assertEquals("っ", FlickKana.modifyLast("づ"))
+        assertEquals("っ", FlickKana.modifyLast("つ"))
+        assertEquals("づ", FlickKana.modifyLast("っ"))
+        assertEquals("つ", FlickKana.modifyLast("づ"))
+        assertEquals("ぅ", FlickKana.modifyLast("う"))
+        assertEquals("ゔ", FlickKana.modifyLast("ぅ"))
+        assertEquals("う", FlickKana.modifyLast("ゔ"))
         assertEquals("ゃ", FlickKana.modifyLast("や"))
     }
 
@@ -57,9 +62,9 @@ class ConversionAndModelTest {
     }
 
     @Test
-    fun mediumModelHasFiveMillionParametersAndRunsInference() {
+    fun mediumModelHasTwentyMillionParametersAndRunsInference() {
         val model = MediumMoETransformer.create()
-        assertTrue("parameter count=${model.parameterCount}", model.parameterCount >= 5_000_000)
+        assertTrue("parameter count=${model.parameterCount}", model.parameterCount >= 20_000_000)
 
         val source = listOf("早く", "速く", "はやく")
         val result = model.rerank(
@@ -84,7 +89,7 @@ class ConversionAndModelTest {
         val model = FileInputStream(modelFile).use { MediumMoETransformer.loadQuantized(it) }
         assertTrue(model.corpusTrained)
         assertTrue(model.sourceLabel.contains("Tatoeba"))
-        assertTrue("parameter count=${model.parameterCount}", model.parameterCount >= 5_000_000)
+        assertTrue("parameter count=${model.parameterCount}", model.parameterCount >= 20_000_000)
 
         val source = listOf("良い感じだと思う", "いい感じだと思う", "良い感じだとおもう")
         val result = model.rerank(
