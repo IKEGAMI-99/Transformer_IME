@@ -2,31 +2,39 @@
 
 Android向けの、完全オンデバイスTransformerを組み込んだ日本語IME実験プロジェクトです。
 
-## 現在の状態: v0.4.0
+## 現在の状態: v0.5.0
 
 - Android `InputMethodService` として登録可能
 - **日本語は12キー・5方向フリック入力**
 - **英数モードだけQWERTY**（Shift対応）
+- **Gboard系の5列配置を参考にした黒基調UI**
+- 左列: Undo / カーソル左 / 記号 / 英数切替
+- 右列: Backspace / カーソル右 / 変換 / Enter
 - 濁点 / 半濁点 / 小文字切替
 - **Mozc OSS辞書ベースの通常かな漢字変換**
-- 地名・人名・一般語を含む拡張辞書を小型SQLiteとしてオンデバイス検索
+- 地名・人名・一般語を含む拡張辞書をSQLiteとしてオンデバイス検索
 - 文節候補を組み合わせるビーム探索
-- 学習済みTiny Transformerによる即時ランキング / 次語予測
+- 学習済みTiny Transformerによる即時ランキング
 - **日本語文コーパスで学習した5,022,784 parameter MoE Transformer**による非同期再ランキング
-- 日本語学習済み5M推論完了時に `✦JP5M xxms` を表示
-- 拡張辞書ロード済みの場合はモデル表示に `·D` を追加
+- **変換確定後、直前文脈から次語・次フレーズ候補を予測**
+- 次候補はTinyで即表示し、JP5Mが直前96文字から再ランキング
 - AI ON/OFF
 - パスワード欄ではAI予測を停止
 - gesture navigation / system gesture / tappable領域を考慮したSafe Area
 - `INTERNET` permissionなし。実機での変換・推論は完全オフライン
 
-## 入力UI
+## v0.5 日本語入力UI
 
-### 日本語
+日本語モードは、一般的なスマートフォン向け12キー配列に合わせて、左右に機能列・中央に3列のかなキーを置きます。Google/Gboardのロゴ・専用画像・専用アセットは使用していません。
 
-日本語モードではQWERTYローマ字入力を廃止し、スマートフォン向けのフリック入力に変更しました。
+```text
+↶      あ      か      さ      ⌫
+◀      た      な      は      ▶
+☺記    ま      や      ら      変換
+あa1   ゛゜小   わ      、。    ↵
+```
 
-基本方向:
+基本フリック方向:
 
 ```text
        ↑ う
@@ -34,48 +42,73 @@ Android向けの、完全オンデバイスTransformerを組み込んだ日本�
        ↓ お
 ```
 
-`か` なら `か/き/く/け/こ`、`さ` なら `さ/し/す/せ/そ` のように各行へ展開します。
+黒背景、白文字、薄いグリッド、ダークグレーのモードキー、ミント系のEnterキーという構成です。英数へ切り替えるとダークテーマのQWERTYになります。
 
-12キー配置:
+## v0.5 確定後の文脈予測
+
+変換を確定した直後、IMEは `InputConnection` からカーソル直前の文章を取得します。
+
+処理:
 
 ```text
-あ      か      さ      ⌫
-た      な      は      ゛゜小
-ま      や      ら      ⏎
-英数    わ      、。    変換/空白
+確定済み文章
+  ↓
+直前160文字を取得
+  ↓
+Tiny Transformer + 文脈候補生成
+  ↓  即時表示
+候補プール
+  ↓
+JP5Mが直前96文字で再ランキング
+  ↓
+次語 / 次フレーズ候補
 ```
-
-`゛゜小` は直前のかなを濁点・半濁点・小文字へ循環変換します。
-
-### 英数
-
-`英数` を押すとQWERTYへ切り替わります。日本語変換は行わず、英字をそのまま入力します。`かな` でフリックへ戻ります。
-
-## v0.4 通常かな漢字変換
-
-v0.3までの通常変換は、アプリ内に手書きした小さな辞書が中心だったため、特に人名・駅名・地名などの固有名詞に弱い状態でした。
-
-v0.4では **Mozc OSS dictionary** をビルド時に取得し、Android向けの読み→候補SQLiteへ再構成します。MozcはGoogle日本語入力を起源とするOSSの日本語IMEで、OSS辞書にはIPAdic系語彙や公開辞書由来の固有表現、Mozcの手動追加語が含まれます。
 
 例:
 
 ```text
-うめだ
+よろしく
   ↓
-梅田
+お願いします
+お願いいたします
+！
 ```
 
-CIでは `dictionary00.txt`〜`dictionary09.txt` と `dictionary_manual/places.tsv` / `words.tsv` を読み、同じ読みの候補をコスト順に圧縮して `mozc_compact.db` を作ります。入力時は変換対象に必要な部分文字列を1回のSQLiteクエリへまとめ、結果をLRUキャッシュします。
+```text
+確認
+  ↓
+しました
+します
+お願いします
+```
 
-このため、巨大な辞書全体をKotlinのHashMapへ展開せずに固有名詞を増やせます。
+JP5Mの再ランキングが完了すると候補先頭に次のように表示します。
 
-なお、Mozc OSS辞書はGoogle日本語入力の商用辞書そのものではありません。Google日本語入力専用の大規模Web語彙はOSS版には含まれません。
+```text
+お願いします  ✦次JP5M 7ms
+```
+
+5Mモデルで自由生成するのではなく、Tinyモデル・定型候補・文脈トリガーから作った小さな候補集合をJP5Mに選ばせる構成です。IME用途ではレイテンシと安定性を優先しています。
+
+## 通常かな漢字変換
+
+通常変換は **Mozc OSS dictionary** をビルド時に取得し、Android向けの読み→候補SQLiteへ再構成します。
+
+例:
+
+```text
+うめだ → 梅田
+はっとり → 服部
+たけはら → 竹原
+```
+
+CIでは `dictionary00.txt`〜`dictionary09.txt` と `dictionary_manual/places.tsv` / `words.tsv` を読み、同じ読みの候補をコスト順に圧縮して `mozc_compact.db` を作ります。入力時は必要な読みだけSQLiteから取得しLRUキャッシュします。
+
+Mozc OSS辞書はGoogle日本語入力の商用辞書そのものではありません。Google日本語入力専用の大規模Web語彙はOSS版には含まれません。
 
 ## AI構成
 
 ### Tiny Transformer
-
-入力直後の候補表示と次語予測を担当する高速モデルです。
 
 - 1 Transformer block
 - hidden size: 24
@@ -83,6 +116,8 @@ CIでは `dictionary00.txt`〜`dictionary09.txt` と `dictionary_manual/places.t
 - FFN: 48
 - context: 12 tokens
 - vocabulary: 65 tokens
+
+役割: 入力直後の変換候補ランキングと、確定後の次候補プール生成。
 
 ### Japanese Medium MoE Transformer
 
@@ -97,13 +132,17 @@ CIでは `dictionary00.txt`〜`dictionary09.txt` と `dictionary_manual/places.t
 - hash vocabulary buckets: 1024
 - symmetric INT8 quantization
 
-入力中は通常辞書 + Tiny Transformerで即座に候補を出し、約140ms入力が止まるとJapanese Medium MoEをバックグラウンドで実行します。
+変換中:
 
 ```text
 梅田  ✦JP5M·D 7ms
 ```
 
-`✦JP5M` は日本語コーパス学習済み5Mモデル、`·D` はMozc拡張辞書がロード済みであることを示します。
+確定後:
+
+```text
+お願いします  ✦次JP5M 7ms
+```
 
 ## 日本語コーパス学習
 
@@ -116,22 +155,9 @@ CIでは `dictionary00.txt`〜`dictionary09.txt` と `dictionary_manual/places.t
 
 生コーパスはAPKへ格納せず、学習後にsymmetric INT8へ量子化した `medium_moe_jpn.q8` のみを含めます。
 
-## Mozc辞書ビルド
-
-辞書ビルダー:
-
-```bash
-python tools/build_mozc_dictionary.py \
-  --output app/src/main/assets/mozc_compact.db \
-  --metadata app/src/main/assets/mozc_compact.meta.json \
-  --max-candidates 8
-```
-
-元データは `google/mozc` のOSS辞書です。辞書由来データにはMozc本体とは別の第三者ライセンスが含まれるため、再配布時はMozcの `src/data/dictionary_oss/README.txt` に記載されたIPAdic / ICOT / Okinawa Dictionary等の条件を確認してください。
-
 ## UI / Safe Area
 
-v0.3以降、次のbottom insetを比較して最大値を採用し、さらに最低44dpの安全領域を確保します。
+次のbottom insetを比較して最大値を採用し、さらに最低44dpの安全領域を確保します。
 
 - `WindowInsets.Type.navigationBars()`
 - `WindowInsets.Type.systemGestures()`
@@ -148,13 +174,11 @@ TatoebaとMozcのダウンロードは**ビルド時のみ**です。インス�
 
 GitHub Actionsは次を自動実行します。
 
-1. Mozc OSS辞書を取得してcompact SQLiteを生成
-2. `うめだ → 梅田` を含むことを検証
-3. Tatoeba学習済み5Mモデルを生成またはcache復元
-4. Kotlin unit test
+1. Mozc OSS compact辞書を生成 / cache復元
+2. `うめだ → 梅田` を検証
+3. Tatoeba学習済みJP5Mを生成 / cache復元
+4. 文脈次候補・フリック・モデルのunit test
 5. APK build
-
-ローカルでフル版APKを作る場合は辞書とモデルassetを生成してから:
 
 ```bash
 gradle :app:testDebugUnitTest
@@ -171,10 +195,11 @@ app/build/outputs/apk/debug/app-debug.apk
 
 - ユーザー辞書・個人頻度学習
 - 文節境界の手動変更
-- フリック入力の方向ガイド表示 / 長押し入力
-- 絵文字・記号パネル
+- フリック方向のポップアップガイド強化
+- 本格的な絵文字・記号パネル
+- 次候補プールをMozc品詞情報から生成
 - INT4量子化
-- より長い日本語コーパス学習とvalidation perplexity計測
+- より長い日本語コーパス学習
 
 ## License / attribution
 
