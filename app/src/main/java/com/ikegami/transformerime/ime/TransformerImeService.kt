@@ -63,6 +63,7 @@ class TransformerImeService : InputMethodService() {
     override fun onDestroy() {
         cancelPendingRerank()
         cancelPendingNextPrediction()
+        runCatching { mediumModel?.close() }
         inferenceExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -454,7 +455,7 @@ class TransformerImeService : InputMethodService() {
 
     private fun scheduleMediumRerank(reading: String, candidates: List<String>) {
         cancelPendingRerank(incrementEpoch = false)
-        if (!aiActive() || secureField || candidates.size <= 1) return
+        if (!aiActive() || secureField || candidates.isEmpty()) return
         val medium = mediumModel ?: return
         val epoch = ++candidateEpoch
         val contextSnapshot = compositionContext
@@ -467,14 +468,14 @@ class TransformerImeService : InputMethodService() {
                 mainHandler.post {
                     if (epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@post
                     currentCandidates = result.candidates
-                    val modelTag = if (medium.corpusTrained) "✦JP21M" else "✦21M"
+                    val modelTag = if (medium.corpusTrained) "✦Z190" else "✦Tiny"
                     val dictionaryTag = if (CandidateGenerator.extendedDictionaryReady) "·D" else ""
                     showCandidates(result.candidates, "$modelTag$dictionaryTag ${result.latencyMs}ms") { commitCandidate(it) }
                 }
             }
         }
         pendingMediumRerank = runnable
-        mainHandler.postDelayed(runnable, 120L)
+        mainHandler.postDelayed(runnable, 80L)
     }
 
     private fun cancelPendingRerank(incrementEpoch: Boolean = true) {
@@ -587,7 +588,7 @@ class TransformerImeService : InputMethodService() {
 
     private fun scheduleMediumNextPrediction(context: String, candidates: List<String>) {
         val medium = mediumModel ?: return
-        if (!aiActive() || candidates.size <= 1) return
+        if (!aiActive() || candidates.isEmpty()) return
         val epoch = ++predictionEpoch
         val contextTail = context.takeLast(160)
         val pool = candidates.toList()
@@ -600,13 +601,13 @@ class TransformerImeService : InputMethodService() {
                     if (epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@post
                     if (textBeforeCursor().takeLast(160) != contextTail) return@post
                     currentCandidates = result.candidates
-                    val modelTag = if (medium.corpusTrained) "✦次JP21M" else "✦次21M"
+                    val modelTag = if (medium.corpusTrained) "✦次Z190" else "✦次Tiny"
                     showCandidates(result.candidates.take(8), "$modelTag ${result.latencyMs}ms") { commitPrediction(it) }
                 }
             }
         }
         pendingNextPrediction = runnable
-        mainHandler.postDelayed(runnable, 70L)
+        mainHandler.postDelayed(runnable, 60L)
     }
 
     private fun commitPrediction(prediction: String) {
