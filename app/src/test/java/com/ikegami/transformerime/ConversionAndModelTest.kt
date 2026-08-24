@@ -5,8 +5,8 @@ import com.ikegami.transformerime.conversion.NextCandidateGenerator
 import com.ikegami.transformerime.ime.FlickDirection
 import com.ikegami.transformerime.ime.FlickKana
 import com.ikegami.transformerime.model.MediumMoETransformer
-import java.io.File
-import java.io.FileInputStream
+import com.ikegami.transformerime.model.Zenzai190MEngine
+import com.ikegami.transformerime.model.ZenzaiPrompt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -62,42 +62,49 @@ class ConversionAndModelTest {
     }
 
     @Test
-    fun mediumModelHasTwentyMillionParametersAndRunsInference() {
-        val model = MediumMoETransformer.create()
-        assertTrue("parameter count=${model.parameterCount}", model.parameterCount >= 20_000_000)
+    fun zenzaiV3PromptCarriesContextAndKatakanaReading() {
+        val prompt = ZenzaiPrompt.conversion("今日は東京へ行く。", "しんじゅくえき")
+        assertTrue(prompt.startsWith("\uEE02今日は東京へ行く。\uEE00"))
+        assertTrue(prompt.contains("シンジュクエキ"))
+        assertTrue(prompt.endsWith("\uEE01"))
 
+        val predictionPrompt = ZenzaiPrompt.inputPrediction("よろしくお願いします")
+        assertEquals("\uEE02よろしくお願いします\uEE00", predictionPrompt)
+    }
+
+    @Test
+    fun speculativeMergeUsesClassicalDraftAndNeuralConstraint() {
+        val drafts = listOf("新宿駅", "新宿液", "新宿", "しんじゅくえき")
+
+        val consensus = Zenzai190MEngine.mergeSpeculativeDrafts(
+            drafts = drafts,
+            primary = "新宿駅",
+            fallback = "新宿駅",
+            primaryMargin = 0.4f
+        )
+        assertEquals("新宿駅", consensus.first())
+
+        val weakNovel = Zenzai190MEngine.mergeSpeculativeDrafts(
+            drafts = drafts,
+            primary = "新宿駅前",
+            fallback = "",
+            primaryMargin = 0.2f
+        )
+        assertEquals("新宿駅", weakNovel.first())
+        assertTrue(weakNovel.contains("新宿駅前"))
+    }
+
+    @Test
+    fun compatibilityAdapterFallsBackWithoutNativeAssets() {
+        val model = MediumMoETransformer.create()
         val source = listOf("早く", "速く", "はやく")
         val result = model.rerank(
             contextText = "明日は仕事だから今日は",
             reading = "はやく",
             candidates = source
         )
-
-        assertEquals(source.toSet(), result.candidates.toSet())
-        assertEquals(source.size, result.candidates.size)
-        assertTrue(result.latencyMs >= 0)
-    }
-
-    @Test
-    fun exportedJapaneseCorpusModelLoadsAndRuns() {
-        val modelFile = listOf(
-            File("app/src/main/assets/medium_moe_jpn.q8"),
-            File("src/main/assets/medium_moe_jpn.q8")
-        ).firstOrNull { it.exists() }
-            ?: error("Generated Japanese model asset was not found")
-
-        val model = FileInputStream(modelFile).use { MediumMoETransformer.loadQuantized(it) }
-        assertTrue(model.corpusTrained)
-        assertTrue(model.sourceLabel.contains("Tatoeba"))
-        assertTrue("parameter count=${model.parameterCount}", model.parameterCount >= 20_000_000)
-
-        val source = listOf("良い感じだと思う", "いい感じだと思う", "良い感じだとおもう")
-        val result = model.rerank(
-            contextText = "これは",
-            reading = "いいかんじだとおもう",
-            candidates = source
-        )
-        assertEquals(source.toSet(), result.candidates.toSet())
-        assertTrue(result.latencyMs >= 0)
+        assertEquals(source, result.candidates)
+        assertEquals(0L, result.latencyMs)
+        assertEquals(0, model.parameterCount)
     }
 }
