@@ -36,16 +36,12 @@ class MainActivity : Activity() {
         }
         val scroll = ScrollView(this).apply { addView(root) }
 
+        root.addView(TextView(this).apply { text = "Transformer IME"; textSize = 30f })
         root.addView(TextView(this).apply {
-            text = "Transformer IME"
-            textSize = 30f
-        })
-        root.addView(TextView(this).apply {
-            text = "v0.10.3 · Zenzai 95M ×10 + Personal RAG + Stable Audio Pulse"
+            text = "v0.10.4 · Zenzai 95M ×10 + Personal RAG + Stable Pulse UX"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 22.dp())
         })
-
         root.addView(TextView(this).apply {
             text = "日本語はフリック、英語はQWERTY。Mozc辞書・Zenzai・端末内の個人学習を組み合わせます。入力内容やAudio Pulseの音声データは外部送信しません。"
             textSize = 16f
@@ -56,12 +52,9 @@ class MainActivity : Activity() {
             text = "キーボード設定を開く"
             setOnClickListener { startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) }
         }, fullButton(22))
-
         root.addView(Button(this).apply {
             text = "入力方法を選択"
-            setOnClickListener {
-                (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
-            }
+            setOnClickListener { (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker() }
         }, fullButton(10))
 
         root.addView(Switch(this).apply {
@@ -77,14 +70,12 @@ class MainActivity : Activity() {
             textSize = 17f
             gravity = Gravity.CENTER_VERTICAL
             isChecked = prefs.getBoolean(AudioPulseService.KEY_ENABLED, false)
-            setOnCheckedChangeListener { _, checked ->
-                if (checked) requestAudioPulse() else disableAudioPulse()
-            }
+            setOnCheckedChangeListener { _, checked -> if (checked) requestAudioPulse() else disableAudioPulse() }
         }
         root.addView(audioSwitch, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 64.dp()))
 
         root.addView(TextView(this).apply {
-            text = "Audio Pulseはキャプチャ可能なシステム再生音のRMSと瞬間ピークだけを解析します。v0.10.3では通常音量で赤に張り付きにくいようピーク余裕を拡大し、ライブ音量値はSharedPreferencesへ連続保存せずメモリ上で受け渡します。無音時は黒です。"
+            text = "Audio Pulseはシステム再生音のRMSと瞬間ピークだけを解析します。無音時は黒、発光は下端から連続グラデーションで立ち上がります。v0.10.4ではIME表示中のnative推論ライフサイクルも見直し、Zenzaiをプロセス共有化しています。"
             textSize = 13f
             setPadding(0, 0, 0, 16.dp())
         })
@@ -93,7 +84,6 @@ class MainActivity : Activity() {
             text = "学習内容を表示"
             setOnClickListener { showLearningData() }
         }, fullButton(8))
-
         root.addView(Button(this).apply {
             text = "学習内容をすべて削除"
             setOnClickListener {
@@ -107,15 +97,15 @@ class MainActivity : Activity() {
         }, fullButton(8))
 
         root.addView(TextView(this).apply {
-            text = "v0.10.3 構成\n" +
+            text = "v0.10.4 構成\n" +
                 "・Zenzai v3.2-small Q5_K_M 約95.1M / 10試行\n" +
-                "・Mozc OSS辞書 + 読み途中予測\n" +
-                "・個人RAG: 過去に選んだ変換と文脈続きを候補プールへ再投入\n" +
-                "・英語QWERTY: 補完・スペル候補・次単語 + 個人学習\n" +
-                "・123: 4×4数字キーパッドへ切替\n" +
-                "・Audio Pulse: メモリ内レベル共有 / 高いピーク余裕 / 下端グラデーション\n" +
-                "・下余白: ナビゲーションバー実寸に追従して縮小\n" +
-                "・パスワード欄: AI・学習とも停止"
+                "・Zenzai runtimeをプロセス共有しnative close競合を回避\n" +
+                "・Personal RAG + Mozc OSS辞書 + 英語予測\n" +
+                "・日本語Enter: 候補未選択ならひらがなのまま確定\n" +
+                "・変換キーを空白キーへ変更\n" +
+                "・修飾キー: 中央=小文字切替 / 左=濁点 / 右=半濁点\n" +
+                "・候補タップ: IME上部を『候補 wwww』が横切る\n" +
+                "・Audio Pulse: 連続Bottom Glow / ナビゲーション余白調整"
             textSize = 14f
             setPadding(0, 20.dp(), 0, 0)
             setLineSpacing(0f, 1.15f)
@@ -169,9 +159,7 @@ class MainActivity : Activity() {
     private fun setAudioSwitchWithoutCallback(value: Boolean) {
         audioSwitch.setOnCheckedChangeListener(null)
         audioSwitch.isChecked = value
-        audioSwitch.setOnCheckedChangeListener { _, checked ->
-            if (checked) requestAudioPulse() else disableAudioPulse()
-        }
+        audioSwitch.setOnCheckedChangeListener { _, checked -> if (checked) requestAudioPulse() else disableAudioPulse() }
     }
 
     private fun showLearningData() {
@@ -179,9 +167,7 @@ class MainActivity : Activity() {
         val entries = store.listEntries(350)
         store.close()
         val formatter = SimpleDateFormat("MM/dd HH:mm", Locale.JAPAN)
-        val text = if (entries.isEmpty()) {
-            "まだ学習データはありません。"
-        } else entries.joinToString("\n\n") { e ->
+        val text = if (entries.isEmpty()) "まだ学習データはありません。" else entries.joinToString("\n\n") { e ->
             val kind = when (e.kind) {
                 UserLearningStore.KIND_CONVERSION -> "変換"
                 UserLearningStore.KIND_NEXT -> "次候補"
@@ -193,10 +179,7 @@ class MainActivity : Activity() {
             "[$kind] ${e.keyText} → ${e.surface}\n選択 ${e.useCount}回 · ${formatter.format(Date(e.lastUsed))}"
         }
         val view = TextView(this).apply {
-            this.text = text
-            textSize = 14f
-            setPadding(20.dp(), 16.dp(), 20.dp(), 16.dp())
-            setTextIsSelectable(true)
+            this.text = text; textSize = 14f; setPadding(20.dp(), 16.dp(), 20.dp(), 16.dp()); setTextIsSelectable(true)
         }
         AlertDialog.Builder(this)
             .setTitle("学習内容 ${entries.size}件")
