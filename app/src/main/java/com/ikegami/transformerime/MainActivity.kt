@@ -1,94 +1,210 @@
 package com.ikegami.transformerime
 
+import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
+import com.ikegami.transformerime.audio.AudioPulseService
+import com.ikegami.transformerime.learning.UserLearningStore
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : Activity() {
     private fun Int.dp(): Int = (this * resources.displayMetrics.density).toInt()
+    private lateinit var audioSwitch: Switch
+    private val prefs by lazy { getSharedPreferences("transformer_ime", Context.MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val prefs = getSharedPreferences("transformer_ime", Context.MODE_PRIVATE)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24.dp(), 32.dp(), 24.dp(), 24.dp())
+            setPadding(24.dp(), 32.dp(), 24.dp(), 32.dp())
         }
+        val scroll = ScrollView(this).apply { addView(root) }
 
         root.addView(TextView(this).apply {
             text = "Transformer IME"
             textSize = 30f
         })
         root.addView(TextView(this).apply {
-            text = "v0.8.0 · Mozc draft + Zenzai ~190M cascade"
+            text = "v0.10 · Zenzai 95M ×10 + Personal RAG + Audio Pulse"
             textSize = 14f
-            setPadding(0, 8.dp(), 0, 28.dp())
+            setPadding(0, 8.dp(), 0, 22.dp())
         })
 
         root.addView(TextView(this).apply {
-            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n日本語は黒基調の12キーフリック、英数はQWERTYです。v0.8ではazooKey/Zenzaiの方式を参考に、かな漢字変換専用のZenzモデルをオンデバイスで使います。入力内容は外部サーバーへ送信しません。"
-            textSize = 17f
-            setLineSpacing(0f, 1.2f)
+            text = "日本語はフリック、英語はQWERTY。Mozc辞書・Zenzai・端末内の個人学習を組み合わせます。入力内容やAudio Pulseの音声データは外部送信しません。"
+            textSize = 16f
+            setLineSpacing(0f, 1.18f)
         })
 
         root.addView(Button(this).apply {
             text = "キーボード設定を開く"
             setOnClickListener { startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) }
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 56.dp()).apply {
-            topMargin = 28.dp()
-        })
+        }, fullButton(22))
 
         root.addView(Button(this).apply {
             text = "入力方法を選択"
             setOnClickListener {
                 (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
             }
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 56.dp()).apply {
-            topMargin = 10.dp()
-        })
+        }, fullButton(10))
 
-        val aiSwitch = Switch(this).apply {
+        root.addView(Switch(this).apply {
             text = "Zenzai変換 / 文脈予測"
             textSize = 17f
             gravity = Gravity.CENTER_VERTICAL
             isChecked = prefs.getBoolean("ai_enabled", true)
             setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("ai_enabled", checked).apply() }
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 64.dp()).apply { topMargin = 20.dp() })
+
+        audioSwitch = Switch(this).apply {
+            text = "Audio Pulse 背景"
+            textSize = 17f
+            gravity = Gravity.CENTER_VERTICAL
+            isChecked = prefs.getBoolean(AudioPulseService.KEY_ENABLED, false)
+            setOnCheckedChangeListener { _, checked ->
+                if (checked) requestAudioPulse() else disableAudioPulse()
+            }
         }
-        root.addView(aiSwitch, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 64.dp()).apply {
-            topMargin = 24.dp()
-        })
+        root.addView(audioSwitch, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 64.dp()))
 
         root.addView(TextView(this).apply {
-            text = "v0.8 構成\n" +
-                "・小文字優先: つ→っ→づ、う→ぅ→ゔ\n" +
-                "・ドラフト変換: Mozc OSS由来SQLite辞書 + ビーム探索\n" +
-                "・Primary: zenz-v3.2-small Q5_K_M 約95.1M parameters\n" +
-                "・Second opinion: zenz-v3.1-small Q5_K_M 約95.1M parameters\n" +
-                "・合計: 約190.2M parameters（通常はPrimaryだけ推論）\n" +
-                "・Zenzai v3形式: 左文脈 + 読み + 出力を直接モデル評価\n" +
-                "・弱い/不一致時だけ2モデル目を使うカスケード\n" +
-                "・推論: llama.cpp / arm64 / GGUF Q5_K_M\n\n" +
-                "辞書を捨てずにドラフトとして使い、ニューラル変換で検証・補正する構成です。"
+            text = "Audio Pulseはキャプチャ可能なシステム再生音の音量だけを解析し、キーボード背景を鼓動させます。初回はAndroidの音声/画面キャプチャ許可が必要です。再生アプリ側がキャプチャ禁止の場合は反応しません。"
+            textSize = 13f
+            setPadding(0, 0, 0, 16.dp())
+        })
+
+        root.addView(Button(this).apply {
+            text = "学習内容を表示"
+            setOnClickListener { showLearningData() }
+        }, fullButton(8))
+
+        root.addView(Button(this).apply {
+            text = "学習内容をすべて削除"
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("個人学習を削除")
+                    .setMessage("変換・次候補・英語・RAG用の学習履歴をすべて削除します。")
+                    .setNegativeButton("キャンセル", null)
+                    .setPositiveButton("削除") { _, _ -> UserLearningStore(this@MainActivity).use { it.clearAll() } }
+                    .show()
+            }
+        }, fullButton(8))
+
+        root.addView(TextView(this).apply {
+            text = "v0.10 構成\n" +
+                "・Zenzai v3.2-small Q5_K_M 約95.1M / 10試行\n" +
+                "・Mozc OSS辞書 + 読み途中予測\n" +
+                "・個人RAG: 過去に選んだ変換と文脈続きを候補プールへ再投入\n" +
+                "・英語QWERTY: 補完・スペル候補・次単語 + 個人学習\n" +
+                "・Audio Pulse: AudioPlaybackCapture / 完全オンデバイス\n" +
+                "・パスワード欄: AI・学習とも停止"
             textSize = 14f
-            setPadding(0, 18.dp(), 0, 0)
+            setPadding(0, 20.dp(), 0, 0)
             setLineSpacing(0f, 1.15f)
         })
 
-        root.addView(TextView(this).apply {
-            text = "Zenzai/Zenzの設計を参考にしたAndroid実装です。モデル・辞書・llama.cppの各ライセンス情報はリポジトリ内のTHIRD_PARTY_MODELS.mdを参照してください。"
-            textSize = 12f
-            setPadding(0, 20.dp(), 0, 0)
-        })
+        setContentView(scroll)
+    }
 
-        setContentView(root)
+    private fun fullButton(top: Int) = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT, 56.dp()
+    ).apply { topMargin = top.dp() }
+
+    private fun requestAudioPulse() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_AUDIO_PERMISSION)
+            return
+        }
+        val manager = getSystemService(MediaProjectionManager::class.java)
+        startActivityForResult(manager.createScreenCaptureIntent(), REQ_MEDIA_PROJECTION)
+    }
+
+    private fun disableAudioPulse() {
+        prefs.edit().putBoolean(AudioPulseService.KEY_ENABLED, false).apply()
+        startService(Intent(this, AudioPulseService::class.java).setAction(AudioPulseService.ACTION_STOP))
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_AUDIO_PERMISSION) {
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) requestAudioPulse()
+            else setAudioSwitchWithoutCallback(false)
+        }
+    }
+
+    @Deprecated("MediaProjection still returns through activity result on the supported minSdk")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_MEDIA_PROJECTION) return
+        if (resultCode != RESULT_OK || data == null) {
+            prefs.edit().putBoolean(AudioPulseService.KEY_ENABLED, false).apply()
+            setAudioSwitchWithoutCallback(false)
+            return
+        }
+        prefs.edit().putBoolean(AudioPulseService.KEY_ENABLED, true).apply()
+        val service = Intent(this, AudioPulseService::class.java)
+            .putExtra(AudioPulseService.EXTRA_RESULT_CODE, resultCode)
+            .putExtra(AudioPulseService.EXTRA_RESULT_DATA, data)
+        startForegroundService(service)
+    }
+
+    private fun setAudioSwitchWithoutCallback(value: Boolean) {
+        audioSwitch.setOnCheckedChangeListener(null)
+        audioSwitch.isChecked = value
+        audioSwitch.setOnCheckedChangeListener { _, checked ->
+            if (checked) requestAudioPulse() else disableAudioPulse()
+        }
+    }
+
+    private fun showLearningData() {
+        val store = UserLearningStore(this)
+        val entries = store.listEntries(350)
+        store.close()
+        val formatter = SimpleDateFormat("MM/dd HH:mm", Locale.JAPAN)
+        val text = if (entries.isEmpty()) {
+            "まだ学習データはありません。"
+        } else entries.joinToString("\n\n") { e ->
+            val kind = when (e.kind) {
+                UserLearningStore.KIND_CONVERSION -> "変換"
+                UserLearningStore.KIND_NEXT -> "次候補"
+                UserLearningStore.KIND_MEMORY -> "RAG記憶"
+                UserLearningStore.KIND_ENGLISH -> "英語"
+                UserLearningStore.KIND_ENGLISH_NEXT -> "英語次候補"
+                else -> e.kind
+            }
+            "[$kind] ${e.keyText} → ${e.surface}\n選択 ${e.useCount}回 · ${formatter.format(Date(e.lastUsed))}"
+        }
+        val view = TextView(this).apply {
+            this.text = text
+            textSize = 14f
+            setPadding(20.dp(), 16.dp(), 20.dp(), 16.dp())
+            setTextIsSelectable(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("学習内容 ${entries.size}件")
+            .setView(ScrollView(this).apply { addView(view) })
+            .setPositiveButton("閉じる", null)
+            .show()
+    }
+
+    companion object {
+        private const val REQ_AUDIO_PERMISSION = 701
+        private const val REQ_MEDIA_PROJECTION = 702
     }
 }
