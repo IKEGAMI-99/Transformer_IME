@@ -163,10 +163,14 @@ jobs:
           # Zenzai v3: context tag + Katakana reading + output tag.
           Path('/tmp/zenz_prompt.txt').write_text('\uee02東京へ行く。\uee00シンジュクエキ\uee01', encoding='utf-8')
           PY
+          set +e
           timeout 60 .cache/llama-host/bin/llama-cli \
             -m app/src/main/assets/zenz-v3.2-small-Q5_K_M.gguf \
-            -f /tmp/zenz_prompt.txt -n 20 --temp 0 > /tmp/zenz_out.txt 2>&1
+            --file /tmp/zenz_prompt.txt --predict 20 --temp 0 > /tmp/zenz_out.txt 2>&1
+          status=$?
+          set -e
           cat /tmp/zenz_out.txt
+          test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
       - uses: actions/setup-java@v4
