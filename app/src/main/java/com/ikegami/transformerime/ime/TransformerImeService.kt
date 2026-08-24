@@ -3,10 +3,10 @@ package com.ikegami.transformerime.ime
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.RadialGradient
 import android.graphics.Shader
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
 import android.os.Handler
@@ -25,7 +25,6 @@ import android.widget.FrameLayout
 import android.widget.GridLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import android.widget.PopupWindow
 import android.widget.ScrollView
 import android.widget.TextView
 import com.ikegami.transformerime.audio.AudioPulseService
@@ -37,10 +36,7 @@ import com.ikegami.transformerime.model.MediumMoETransformer
 import com.ikegami.transformerime.model.ModelRepository
 import com.ikegami.transformerime.model.TinyTransformerModel
 import java.util.concurrent.Executors
-import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.sin
 
 class TransformerImeService : InputMethodService() {
     private val compositionBuffer = StringBuilder()
@@ -73,7 +69,7 @@ class TransformerImeService : InputMethodService() {
             val prefs = getSharedPreferences(AudioPulseService.PREFS, Context.MODE_PRIVATE)
             val enabled = prefs.getBoolean(AudioPulseService.KEY_ENABLED, false)
             val level = if (enabled) prefs.getFloat(AudioPulseService.KEY_LEVEL, 0f) else 0f
-            pulseBackground?.setPulse(level)
+            pulseBackground?.setPulse(level, enabled)
             if (pulseBackground != null) mainHandler.postDelayed(this, 33L)
         }
     }
@@ -133,28 +129,16 @@ class TransformerImeService : InputMethodService() {
     override fun onCreateInputView(): View {
         val minimumBottomSafe = 44.dp()
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-        pulseBackground = AudioPulseBackgroundView(this)
-        root.addView(pulseBackground, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, minimumBottomSafe)
             setBackgroundColor(Color.TRANSPARENT)
-            setOnApplyWindowInsetsListener { view, insets ->
-                val nav = insets.getInsets(WindowInsets.Type.navigationBars())
-                val gestures = insets.getInsets(WindowInsets.Type.systemGestures())
-                val mandatory = insets.getInsets(WindowInsets.Type.mandatorySystemGestures())
-                val tappable = insets.getInsets(WindowInsets.Type.tappableElement())
-                val bottom = maxOf(nav.bottom, gestures.bottom, mandatory.bottom, tappable.bottom)
-                view.setPadding(0, 0, 0, maxOf(minimumBottomSafe, bottom + 8.dp()))
-                insets
-            }
         }
 
         val candidateHost = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.argb(235, 45, 45, 45))
+            setBackgroundColor(Color.argb(245, 45, 45, 45))
         }
         val scroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
@@ -171,15 +155,44 @@ class TransformerImeService : InputMethodService() {
         candidateHost.addView(scroll, LinearLayout.LayoutParams(0, 50.dp(), 1f))
         content.addView(candidateHost, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 50.dp()))
 
+        val keyboardHost = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+        }
+        pulseBackground = AudioPulseBackgroundView(this)
+        keyboardHost.addView(
+            pulseBackground,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        )
+
         keyboardContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, minimumBottomSafe)
             setBackgroundColor(Color.TRANSPARENT)
+            setOnApplyWindowInsetsListener { view, insets ->
+                val nav = insets.getInsets(WindowInsets.Type.navigationBars())
+                val gestures = insets.getInsets(WindowInsets.Type.systemGestures())
+                val mandatory = insets.getInsets(WindowInsets.Type.mandatorySystemGestures())
+                val tappable = insets.getInsets(WindowInsets.Type.tappableElement())
+                val bottom = maxOf(nav.bottom, gestures.bottom, mandatory.bottom, tappable.bottom)
+                view.setPadding(0, 0, 0, maxOf(minimumBottomSafe, bottom + 8.dp()))
+                insets
+            }
         }
-        content.addView(keyboardContainer, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        root.addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+        keyboardHost.addView(
+            keyboardContainer,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT)
+        )
+        content.addView(
+            keyboardHost,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        )
+        root.addView(
+            content,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
+        )
 
         renderKeyboard()
-        content.requestApplyInsets()
+        keyboardContainer?.requestApplyInsets()
         mainHandler.removeCallbacks(pulseRunnable)
         mainHandler.post(pulseRunnable)
         if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
@@ -241,7 +254,7 @@ class TransformerImeService : InputMethodService() {
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
         }, LinearLayout.LayoutParams(0, 48.dp(), 2f))
-        header.addView(functionButton("⌫") { handleBackspace() }, LinearLayout.LayoutParams(0, 48.dp(), 1f))
+        header.addView(deleteRepeatButton(), LinearLayout.LayoutParams(0, 48.dp(), 1f))
         root.addView(header)
 
         val recent = emojiRecents()
@@ -262,85 +275,56 @@ class TransformerImeService : InputMethodService() {
         root.addView(ScrollView(this).apply { addView(grid) }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 192.dp()))
     }
 
+    /** Standard keypad layer. v0.10.1 intentionally removes the radial/fan popup. */
     private fun renderNumberPanel() {
         val root = keyboardContainer ?: return
         root.removeAllViews()
-        val values = listOf("1","2","3","4","5","6","7","8","9","0","-","/",":",";","(", ")","¥","&","@","\"",".",",","?","!","'","#","%","+")
-        val grid = GridLayout(this).apply { columnCount = 7; setPadding(6.dp(), 4.dp(), 6.dp(), 4.dp()) }
-        values.forEach { value ->
-            grid.addView(panelKey(value) { commitDirect(value) }, GridLayout.LayoutParams().apply { width = 50.dp(); height = 48.dp() })
-        }
-        root.addView(grid, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 192.dp()))
-        val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        bottom.addView(functionButton("← かな") { renderKeyboard() }, LinearLayout.LayoutParams(0, 54.dp(), 1f))
-        bottom.addView(functionButton("space") { commitDirect(" ") }, LinearLayout.LayoutParams(0, 54.dp(), 2f))
-        bottom.addView(deleteRepeatButton(), LinearLayout.LayoutParams(0, 54.dp(), 1f))
-        root.addView(bottom)
-    }
-
-    private fun numberMenuButton(): Button = functionButton("123").apply {
-        setOnClickListener { renderNumberPanel() }
-        setOnLongClickListener {
-            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-            showNumberFan(this)
-            true
-        }
-    }
-
-    private fun showNumberFan(anchor: View) {
-        val width = 310.dp()
-        val height = 180.dp()
-        val frame = FrameLayout(this).apply {
-            background = GradientDrawable().apply {
-                setColor(Color.argb(245, 35, 35, 35))
-                cornerRadius = 28.dp().toFloat()
-                setStroke(1.dp(), Color.rgb(90, 90, 90))
+        val rows = listOf(
+            listOf("1", "2", "3", "⌫"),
+            listOf("4", "5", "6", "-"),
+            listOf("7", "8", "9", "/"),
+            listOf("かな", "0", ".", "↵")
+        )
+        rows.forEach { labels ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(4.dp(), 2.dp(), 4.dp(), 2.dp())
+                setBackgroundColor(Color.TRANSPARENT)
             }
-        }
-        val radius = 115.dp().toFloat()
-        val cx = width / 2f
-        val cy = height - 26.dp().toFloat()
-        (0..9).forEach { digit ->
-            val angle = PI + (PI * digit / 9.0)
-            val x = cx + cos(angle).toFloat() * radius
-            val y = cy + sin(angle).toFloat() * radius
-            val key = panelKey(digit.toString()) {
-                commitDirect(digit.toString())
+            labels.forEach { label ->
+                val key: View = when (label) {
+                    "⌫" -> deleteRepeatButton()
+                    "かな" -> numberPadButton(label) { renderKeyboard() }
+                    "↵" -> numberPadButton(label, accent = true) { handleEnter() }
+                    else -> numberPadButton(label) { commitDirect(label) }
+                }
+                row.addView(key, LinearLayout.LayoutParams(0, 62.dp(), 1f).apply {
+                    marginStart = 3.dp(); marginEnd = 3.dp(); topMargin = 2.dp(); bottomMargin = 2.dp()
+                })
             }
-            frame.addView(key, FrameLayout.LayoutParams(42.dp(), 42.dp()).apply {
-                leftMargin = (x - 21.dp()).toInt()
-                topMargin = (y - 21.dp()).toInt()
-            })
-        }
-        val popup = PopupWindow(frame, width, height, true).apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            isOutsideTouchable = true
-            elevation = 12.dp().toFloat()
-        }
-        frame.setTag(popup)
-        frame.touchables
-        popup.showAsDropDown(anchor, -width + anchor.width + 4.dp(), -height - anchor.height - 4.dp())
-        frame.children().forEach { child ->
-            child.setOnClickListener {
-                val text = (child as TextView).text.toString()
-                commitDirect(text)
-                popup.dismiss()
-            }
+            root.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 66.dp()))
         }
     }
 
-    private fun FrameLayout.children(): List<View> = (0 until childCount).map { getChildAt(it) }
+    private fun numberMenuButton(): Button = functionButton("123") { renderNumberPanel() }
 
-    private fun panelKey(label: String, action: () -> Unit): TextView = TextView(this).apply {
+    private fun numberPadButton(label: String, accent: Boolean = false, action: () -> Unit): Button = Button(this).apply {
         text = label
-        textSize = 20f
+        textSize = if (label == "かな") 16f else 24f
         gravity = Gravity.CENTER
         setTextColor(Color.WHITE)
+        isAllCaps = false
+        minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+        setPadding(0, 0, 0, 0)
         background = GradientDrawable().apply {
-            setColor(Color.argb(225, 12, 12, 12))
-            cornerRadius = 22.dp().toFloat()
+            setColor(if (accent) ACCENT else Color.argb(215, 14, 14, 18))
+            cornerRadius = 12.dp().toFloat()
+            setStroke(1.dp(), Color.argb(160, 70, 70, 78))
         }
-        setOnClickListener { action() }
+        setOnClickListener {
+            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            action()
+        }
     }
 
     private fun emojiRecents(): List<String> = getSharedPreferences("transformer_ime", Context.MODE_PRIVATE)
@@ -545,7 +529,7 @@ class TransformerImeService : InputMethodService() {
         fun shape(color: Int) = GradientDrawable().apply { setColor(color); cornerRadius = 6.dp().toFloat() }
         return StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_pressed), shape(if (accent) ACCENT_PRESSED else Color.argb(235, 78, 78, 78)))
-            addState(intArrayOf(), shape(if (accent) ACCENT else Color.argb(225, 38, 38, 38)))
+            addState(intArrayOf(), shape(if (accent) ACCENT else Color.argb(205, 28, 28, 34)))
         }
     }
 
@@ -859,38 +843,116 @@ class TransformerImeService : InputMethodService() {
     private fun japaneseCenterParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.18f)
     private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 55.dp())
 
+    /**
+     * Audio-reactive background that is mounted only behind the key area.
+     * Quiet audio stays blue/cyan, medium volume moves through violet/magenta,
+     * and loud peaks shift toward hot pink/orange. Fast rises create a short beat envelope.
+     */
     private class AudioPulseBackgroundView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private var pulse = 0f
-        fun setPulse(value: Float) {
+        private var audioEnabled = false
+        private var target = 0f
+        private var smoothed = 0f
+        private var beat = 0f
+        private var previousTarget = 0f
+
+        fun setPulse(value: Float, enabled: Boolean) {
+            audioEnabled = enabled
             val v = value.coerceIn(0f, 1f)
-            if (abs(v - pulse) > 0.008f) { pulse = v; invalidate() }
+            val rise = (v - previousTarget).coerceAtLeast(0f)
+            if (rise > 0.018f) {
+                beat = maxOf(beat, (rise * 4.2f + v * 0.32f).coerceIn(0f, 1f))
+            }
+            previousTarget = v
+            target = v
+            smoothed = if (target > smoothed) {
+                smoothed * 0.22f + target * 0.78f
+            } else {
+                smoothed * 0.74f + target * 0.26f
+            }
+            beat *= 0.80f
+            invalidate()
         }
+
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             canvas.drawColor(Color.BLACK)
-            if (width <= 0 || height <= 0 || pulse < 0.01f) return
-            val alpha = (35 + pulse * 185).toInt().coerceIn(0, 220)
-            val radius = maxOf(width, height) * (0.55f + pulse * 0.30f)
-            paint.shader = RadialGradient(
-                width * 0.52f, height * 0.50f, radius,
-                intArrayOf(
-                    Color.argb(alpha, 38, 220, 230),
-                    Color.argb((alpha * 0.62f).toInt(), 120, 60, 255),
-                    Color.argb(0, 0, 0, 0)
-                ),
-                floatArrayOf(0f, 0.52f, 1f), Shader.TileMode.CLAMP
+            if (!audioEnabled || width <= 0 || height <= 0) return
+
+            val energy = (smoothed * 0.78f + beat * 0.62f).coerceIn(0f, 1f)
+            val pulse = maxOf(smoothed, beat).coerceIn(0f, 1f)
+
+            val low = Color.rgb(0, 132, 190)
+            val medium = Color.rgb(106, 48, 230)
+            val high = Color.rgb(255, 34, 126)
+            val peak = Color.rgb(255, 116, 34)
+            val reactive = when {
+                energy < 0.38f -> blend(low, medium, energy / 0.38f)
+                energy < 0.76f -> blend(medium, high, (energy - 0.38f) / 0.38f)
+                else -> blend(high, peak, (energy - 0.76f) / 0.24f)
+            }
+
+            val top = blend(Color.rgb(20, 10, 62), reactive, 0.25f + energy * 0.42f)
+            val bottom = blend(Color.rgb(0, 72, 110), reactive, 0.36f + energy * 0.50f)
+            paint.shader = LinearGradient(
+                0f, 0f, width.toFloat(), height.toFloat(),
+                intArrayOf(top, blend(top, bottom, 0.52f), bottom),
+                floatArrayOf(0f, 0.52f, 1f),
+                Shader.TileMode.CLAMP
             )
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+
+            val alpha = (55 + energy * 178 + beat * 32).toInt().coerceIn(0, 255)
+            val radius = maxOf(width, height) * (0.46f + pulse * 0.34f + beat * 0.12f)
+            paint.shader = RadialGradient(
+                width * 0.50f,
+                height * (0.55f - beat * 0.04f),
+                radius,
+                intArrayOf(
+                    withAlpha(reactive, alpha),
+                    withAlpha(blend(reactive, Color.WHITE, 0.16f), (alpha * 0.48f).toInt()),
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(0f, 0.50f, 1f),
+                Shader.TileMode.CLAMP
+            )
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+
+            if (beat > 0.08f) {
+                val ringRadius = maxOf(width, height) * (0.26f + beat * 0.38f)
+                paint.shader = RadialGradient(
+                    width * 0.50f, height * 0.53f, ringRadius,
+                    intArrayOf(
+                        withAlpha(Color.WHITE, (beat * 62f).toInt()),
+                        withAlpha(reactive, (beat * 110f).toInt()),
+                        Color.TRANSPARENT
+                    ),
+                    floatArrayOf(0f, 0.62f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+            }
             paint.shader = null
         }
+
+        private fun blend(a: Int, b: Int, tValue: Float): Int {
+            val t = tValue.coerceIn(0f, 1f)
+            val r = (Color.red(a) + (Color.red(b) - Color.red(a)) * t).toInt()
+            val g = (Color.green(a) + (Color.green(b) - Color.green(a)) * t).toInt()
+            val bl = (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).toInt()
+            return Color.rgb(r, g, bl)
+        }
+
+        private fun withAlpha(color: Int, alpha: Int): Int = Color.argb(
+            alpha.coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color)
+        )
     }
 
     companion object {
-        private val KEY_BLACK = Color.argb(225, 0, 0, 0)
-        private val GRID_LINE = Color.argb(180, 40, 40, 40)
-        private val PRESSED = Color.argb(240, 70, 70, 70)
-        private val MODE_PILL = Color.argb(230, 55, 55, 55)
+        private val KEY_BLACK = Color.argb(207, 0, 0, 0)
+        private val GRID_LINE = Color.argb(165, 42, 42, 52)
+        private val PRESSED = Color.argb(235, 76, 76, 84)
+        private val MODE_PILL = Color.argb(220, 55, 55, 62)
         private val ACCENT = Color.rgb(126, 203, 196)
         private val ACCENT_PRESSED = Color.rgb(96, 173, 166)
         private val EMOJIS = listOf(
