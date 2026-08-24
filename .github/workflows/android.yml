@@ -114,8 +114,8 @@ jobs:
           assert path.read_bytes()[:4] == b'GGUF'
           assert path.stat().st_size > 65_000_000
           result = {
-              'version': '0.10.3',
-              'design': 'single Zenzai v3.2; 10-way conversion and next prediction; Personal RAG; 4x4 number pad; in-memory Audio Pulse transport; raised peak headroom; compact navigation padding',
+              'version': '0.10.4',
+              'design': 'single process-wide Zenzai v3.2; 10-way conversion; Personal RAG; raw-enter; Japanese space key; direct dakuten/handakuten flicks; Nico-style candidate comments; continuous bottom glow; guarded IME lifecycle',
               'estimated_total_parameters': 95_100_000,
               'quantization': 'Q5_K_M',
               'inference_trials': 10,
@@ -161,29 +161,35 @@ jobs:
           test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
-      - name: Verify v0.10.3 architecture
+      - name: Verify v0.10.4 architecture
         run: |
           IME=app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
+          FLICK=app/src/main/java/com/ikegami/transformerime/ime/FlickKana.kt
+          MEDIUM=app/src/main/java/com/ikegami/transformerime/model/MediumMoETransformer.kt
           PULSE=app/src/main/java/com/ikegami/transformerime/audio/AudioPulseService.kt
           STATE=app/src/main/java/com/ikegami/transformerime/audio/AudioPulseState.kt
-          grep -q "versionName '0.10.3'" app/build.gradle
+          grep -q "versionName '0.10.4'" app/build.gradle
           grep -q 'INFERENCE_TRIALS = 10' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
-          grep -q 'forceRawReadingSecond' "$IME"
-          grep -q '✦Z95×10' "$IME"
-          grep -q 'private fun renderNumberPanel' "$IME"
+          grep -q '@Volatile private var sharedInstance' "$MEDIUM"
+          grep -q 'fun close() = Unit' "$MEDIUM"
+          grep -q 'private fun submitInference' "$IME"
+          grep -q 'inferenceExecutor.shutdown()' "$IME"
+          grep -q 'override fun onFinishInputView' "$IME"
+          grep -q 'val minimumBottomSafe = 18.dp()' "$IME"
+          grep -q 'nav.bottom.coerceAtMost(30.dp())' "$IME"
+          grep -q 'functionButton("空白")' "$IME"
+          grep -q 'commitRawReading()' "$IME"
+          grep -q 'private fun kanaModifierFlickButton' "$IME"
+          grep -q 'ModifierAction.DAKUTEN' "$IME"
+          grep -q 'ModifierAction.HANDAKUTEN' "$IME"
+          grep -q 'fun applyDakuten' "$FLICK"
+          grep -q 'fun applyHandakuten' "$FLICK"
+          grep -q 'text = "$candidate wwww"' "$IME"
+          grep -q 'LinearInterpolator' "$IME"
+          grep -q 'val glowHeight = height \* (0.48f' "$IME"
+          grep -q 'floatArrayOf(0f, 0.18f, 0.46f, 0.76f, 1f)' "$IME"
           grep -q 'AudioPulseState.level' "$IME"
-          grep -q 'mainHandler.postDelayed(this, 40L)' "$IME"
-          grep -q 'val minimumBottomSafe = 8.dp()' "$IME"
-          grep -q 'maxOf(minimumBottomSafe, nav.bottom)' "$IME"
-          grep -q 'addOnLayoutChangeListener' "$IME"
-          ! grep -q '320.dp()' "$IME"
-          grep -q 'energy < 0.92f' "$IME"
-          grep -q 'private val KEY_BLACK = Color.TRANSPARENT' "$IME"
           grep -q 'AudioPulseState.publish(envelope)' "$PULSE"
-          grep -q 'gated.pow(1.45f)' "$PULSE"
-          grep -q 'rmsDb + 48f' "$PULSE"
-          grep -q 'samplePeak.toFloat() - 0.04f' "$PULSE"
-          ! grep -q 'putFloat(KEY_LEVEL, envelope)' "$PULSE"
           grep -q '@Volatile var level' "$STATE"
           test ! -f app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf
 
@@ -228,13 +234,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.3-Zenzai95M-x10-StablePulse-debug
+          name: Transformer-IME-v0.10.4-Zenzai95M-x10-StableUX-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.10.3 metadata
+      - name: Upload v0.10.4 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.3-metadata
+          name: Transformer-IME-v0.10.4-metadata
           path: |
             app/src/main/assets/zenzai95.meta.json
             app/src/main/assets/mozc_compact.meta.json
