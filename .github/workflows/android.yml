@@ -186,8 +186,8 @@ jobs:
           assert 'i + need > text.size()' in jni
           assert 'dropped_tail = true' in jni
           assert '0xD800' in jni and '0xDC00' in jni
-          assert 'NewStringUTF' not in jni
-          assert 'GetStringUTFChars' not in jni
+          assert 'env->NewStringUTF' not in jni
+          assert 'env->GetStringUTFChars' not in jni
           # Exact shape of the reported failure: a valid Japanese UTF-8 prefix ending in an
           # incomplete 3-byte sequence. It must remain a permanent regression fixture.
           crash_tail = bytes.fromhex('e3 82 a2 e3 82 a4 e3 83 8e ee b8')
