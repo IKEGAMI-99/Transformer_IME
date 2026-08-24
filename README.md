@@ -4,19 +4,19 @@ Android向けの、**完全オンデバイスAI日本語IME**実験プロジェ�
 
 Mozc OSS辞書による高速かな漢字変換を土台に、Zenzai v3.2-smallによるニューラル変換・文脈予測、端末内SQLiteを使ったPersonal RAG / 個人学習、英語入力予測、Audio Pulse UIを組み合わせています。
 
-**現在のバージョン: v0.10.3**
+**現在のバージョン: v0.10.4**
 
 ## APKダウンロード
 
-### v0.10.3
+### v0.10.4
 
-[📱 Transformer IME v0.10.3 APKをダウンロード](https://github.com/IKEGAMI-99/Transformer_IME/actions/runs/32728401189/artifacts/9520505464)
+[📱 Transformer IME v0.10.4 APKをダウンロード](https://github.com/IKEGAMI-99/Transformer_IME/actions/runs/32732549820/artifacts/9522054849)
 
 GitHub ActionsでZenzai実変換、source verification、unit test、Android NDK、APK生成まで検証済みのdebug APKです。
 
 artifactはZIPとしてダウンロードされ、その中に `app-debug.apk` が入っています。GitHubへのログインが必要な場合があります。
 
-GitHub Actions artifactには保存期限があります。期限切れの場合は [最新のAndroid Build](https://github.com/IKEGAMI-99/Transformer_IME/actions/workflows/android.yml) から最新成功ビルドのAPKを取得してください。
+GitHub Actions artifactには保存期限があります。期限切れの場合は [最新のAndroid Build](https://github.com/IKEGAMI-99/Transformer_IME/actions/workflows/android.yml) から最新成功ビルドを取得してください。
 
 ---
 
@@ -33,160 +33,159 @@ GitHub Actions artifactには保存期限があります。期限切れの場合
 - **Personal RAG / 個人学習**
 - 学習内容の閲覧・全削除
 - 絵文字パネル + 最近使った絵文字
-- `123` から**4×4数字キーパッド**へ切替
+- `123` → 4×4数字キーパッド
 - Backspace長押し連続削除
-- **Audio Pulse**: 無音時は黒、音が入るとキー領域の下端から光が立ち上がる
-- 通常音量は青〜紫中心、ピンク〜オレンジは大きなピーク時のみ
-- Audio Pulseのリアルタイム値はプロセス内メモリで共有
-- Pulse背景の高さは実際のキーボード高さへ追従
-- 下部余白は実際のnavigation bar insetを使用し、固定44dp余白を廃止
+- 日本語の `変換` キーを **空白** キーへ変更
+- Enterは候補未選択なら**ひらがなのまま確定**
+- 修飾キーは **中央=小文字切替 / 左=濁点 / 右=半濁点**
+- 変換候補タップ時、IME上部を `候補 wwww` がニコニコ動画風に流れる
+- **Audio Pulse**: 無音時は黒、下端から連続グラデーションで発光
 - 通常キー面は透明で背景グローを直接表示
-- パスワード欄ではAI・個人学習を停止
+- パスワード欄ではAI・個人学習・コメント演出を停止
 - `INTERNET` permissionなし
 - 推論・学習・変換は端末内で完結
 
 ---
 
-## v0.10.3
+## v0.10.4: 安定性改善
 
-v0.10.3は実機フィードバックをもとに、**Audio Pulseのダイナミックレンジ、安定性、キーボード下部余白**を改善したバージョンです。
+v0.10.4では、IMEの途中終了につながる可能性があったZenzai native runtimeのライフサイクルを見直しました。
 
-### Audio Pulseのピークを高く
+従来は `InputMethodService` が破棄される際、別スレッドでllama.cpp推論が継続中でもモデルをcloseできる構造でした。
 
-v0.10.2では一般的な音楽でもピンク〜オレンジへ到達しやすかったため、v0.10.3では音量カーブを再調整しました。
+現在はZenzai 95Mを**Androidプロセス内で共有する1インスタンス**として保持します。
 
 ```text
-無音       黒
-小〜中音量 青 / シアン
-通常音量   シアン / 紫
-大音量     紫 / ピンク
-強いピーク ピンク / オレンジ
+Android process
+   ↓
+shared Zenzai 95M runtime
+   ├ IME input view A
+   ├ IME input view B
+   └ async inference
 ```
 
-RMSはdBスケールへ変換し、peak値と組み合わせたあと非線形カーブを通します。描画側でもオレンジはvisual energyの上端付近に限定しています。
+IME Viewを閉じた際はPulse更新、コメントアニメーション、View参照を解除しますが、実行中のnative inferenceを途中で破棄しません。
+
+executorへの投入もライフサイクル状態を確認してから行い、shutdown後に新しい推論を送らない構成です。
+
+この変更はクラッシュ原因として疑わしい競合を除去するものですが、実機上での完全な安定性は継続検証中です。
 
 ---
 
-## Audio Pulseの安定性改善
+## 日本語入力の操作
 
-v0.10.2ではAudioRecordの各バッファ処理ごとにSharedPreferencesへレベルを書き込み、IME側が繰り返し読み出していました。
+### Enter
 
-v0.10.3では `AudioPulseState` を追加し、サービスとIME間のライブ音量を**プロセス内メモリだけで共有**します。
+変換候補をタップしていない状態でEnterを押した場合、候補1位を自動採用しません。
 
 ```text
-AudioPlaybackCapture
-        ↓
-AudioRecord
-        ↓
-RMS + instantaneous peak
-        ↓
-AudioPulseState.level
-        ↓
-IME AudioPulseBackgroundView
+きょうは
+   ↓ Enter
+きょうは
 ```
 
-これによりリアルタイム処理中の不要なPreference I/Oを削除しています。
+ひらがなのまま確定します。
 
-さらにAudioRecordの生成・録音開始失敗を検出し、失敗時はPulse状態をリセットして安全に停止します。
+漢字へ変換したい場合は候補バーから候補を直接選択します。
 
-IME側のPulse更新も約30fpsから**25fps（40ms間隔）**へ下げ、表示品質を大きく落とさず描画負荷を軽減しています。
+### 空白キー
+
+旧 `変換` キーは `空白` に変更しました。
+
+入力中のひらがながある場合は、そのひらがなをそのまま確定してからスペースを入力します。
+
+### 濁点 / 半濁点 / 小文字
+
+修飾キー:
+
+```text
+        小文字切替
+            ↑
+濁点  ←  ゛ 小 ゜  →  半濁点
+```
+
+中央タップは従来の小文字優先サイクルを維持します。
+
+```text
+つ → っ → づ
+う → ぅ → ゔ
+```
+
+左フリックでは直接濁点、右フリックでは直接半濁点を適用します。
+
+```text
+か + 左 → が
+は + 左 → ば
+は + 右 → ぱ
+ば + 右 → ぱ
+```
 
 ---
 
-## 下部余白
+## NicoNico-style candidate comment
 
-v0.10.2では44dpの固定minimum paddingがあり、一部端末でキーボード下部に大きな黒い余白ができていました。
-
-v0.10.3では固定44dpを廃止し、**実際のnavigation bar inset + 8dp minimum**を利用します。
-
-またAudio Pulse背景も固定320dpではなく、`keyboardContainer` の実測高さへ追従します。
+日本語・次候補などの候補バーをタップすると、IME上部を選択語が右から左へ流れます。
 
 ```text
-候補バー
-────────────
-キー領域       ← Pulse Viewも同じ高さ
-キー領域
-キー領域
-────────────
-必要最小限のnavigation inset
+新宿駅 wwww   → → →
 ```
 
-端末ごとのgesture areaが大きくても、それをそのまま余白として追加しません。
+- 右から左へ約3.4秒で移動
+- 白文字 + 黒シャドウ
+- 2レーン
+- `SYSTEM_ALERT_WINDOW` 不使用
+- IMEウィンドウ内だけで表示
+- パスワード欄では停止
+
+システムオーバーレイ権限を使わないため、他アプリのWindowへ直接描画しません。
 
 ---
 
 ## Bottom Glow Audio Pulse
 
-Audio PulseはAndroidの `AudioPlaybackCapture` で取得可能なシステム再生音を解析し、キー領域の**下端を光源**として発光します。
+Audio PulseはAndroidの `AudioPlaybackCapture` で取得可能なシステム再生音を解析します。
 
 ```text
 システム再生音
       ↓
 AudioPlaybackCapture
       ↓
-PCM 16bit
+RMS + instantaneous peak
       ↓
-RMS → dB scale
-+ instantaneous peak
+AudioPulseState
       ↓
-noise gate / nonlinear curve
+fast attack / slow decay
       ↓
-fast attack / slower decay
-      ↓
-bottom-up LinearGradient
-+ bottom-center RadialGradient
+Bottom-up gradient
 ```
 
-無音時は黒で、通常キー面は透明です。音が入ったときだけ背景の光がキー越しに見えます。
+### v0.10.4の描画
 
-音声そのものは保存しません。
-
-### Audio Pulseの有効化
-
-1. Transformer IMEアプリ本体を開く
-2. `Audio Pulse 背景` をON
-3. `RECORD_AUDIO` を許可
-4. Androidの画面 / 音声キャプチャ確認を許可
-
-再生アプリ側がAudioPlaybackCaptureを禁止している場合、そのアプリの音には反応しません。
-
----
-
-## 数字キーパッド
-
-日本語フリック右側の `123` を押すと、独立した4×4数字キーパッドへ切り替わります。
+グラデーションの途中に横方向の切れ目が見えにくいよう、上方向のフェザーを長くし、5段階のLinearGradientに変更しました。
 
 ```text
-1    2    3    ⌫
-4    5    6    -
-7    8    9    /
-かな  0    .    ↵
+上側    ほぼ透明
+        ↓
+        薄い色
+        ↓
+        中間色
+        ↓
+        強い色
+下端    最も明るい光源
 ```
 
-`かな` で日本語フリックへ戻ります。
+下中央のRadialGradientも重ねています。
 
-Backspaceは数字レイヤーでも長押し連続削除に対応します。
+無音時は黒です。通常音量は青〜紫中心で、ピンク〜オレンジは大きなピーク側に寄せています。
 
----
+### 下部システムUI
 
-## 日本語かな漢字変換
+IME下端はnavigation barとの重なりを避けつつ、大きな黒余白にならないよう調整しています。
 
-Mozc OSS dictionaryをビルド時にAndroid向けSQLiteへ再構成しています。
-
-```text
-うめだ         → 梅田
-しんじゅくえき → 新宿駅
-はっとり       → 服部
-```
-
-prefix indexも持つため、読みを最後まで入力する前から候補を出せます。
-
-`゛゜大小` は小文字が存在する場合、小文字を優先します。
-
-```text
-つ → っ → づ
-う → ぅ → ゔ
-```
+- minimum safe inset: 18dp
+- navigation bar insetを使用
+- 一部OEMで異常に大きい値が返る場合は最大30dpへ制限
+- navigation bar背景は黒
 
 ---
 
@@ -200,19 +199,14 @@ prefix indexも持つため、読みを最後まで入力する前から候補�
 - Q5_K_M
 - Apache-2.0
 
-Zenzai v3.2-smallを1モデル搭載し、同一入力に対して最大10分岐を試します。
+Zenzaiは1モデルだけ搭載し、同一入力に対して最大10分岐を試します。
 
 ```text
 左文脈 + 読み
       ↓
 Mozc candidate pool
       ↓
-Zenzai 95M
- ├ trial 1
- ├ trial 2
- ├ trial 3
- ├ ...
- └ trial 10
+Zenzai 95M × 10 trials
       ↓
 AI第1候補
       ↓
@@ -282,6 +276,7 @@ Zenzai rerank
 - パスワード欄ではAI候補生成停止
 - パスワード欄では個人学習停止
 - Audio Pulseの音声データは保存しない
+- NicoコメントはIME Window内だけで描画
 
 Audio Pulse用権限:
 
@@ -313,51 +308,55 @@ CIでは以下を自動検証します。
 3. Zenzai v3.2-small GGUF
 4. azooKey llama.cpp host build
 5. Zenzai実かな漢字変換 smoke test
-6. Zenzai 95M ×10構成
-7. 4×4数字キーパッド
-8. Process-local AudioPulseState
-9. SharedPreferences hot-path書き込みがないこと
-10. AudioRecord start failure guard
-11. Pulse polling 40ms
-12. 実測keyboard heightへのPulse View追従
-13. compact navigation inset
-14. Bottom-up LinearGradient / RadialGradient
-15. 高いcolour headroom
-16. Kotlin unit tests
-17. Android NDK / arm64 build
-18. APK内の単一GGUF + `libzenzjni.so`
-19. APK artifact upload
+6. Zenzai 95M ×10
+7. process-wide Zenzai runtime
+8. IME lifecycle / executor guard
+9. raw Enter
+10. 日本語空白キー
+11. 左濁点 / 右半濁点
+12. NicoNico-style candidate comment
+13. Bottom Glow 5-stop gradient
+14. navigation inset制御
+15. Kotlin unit tests
+16. Android NDK / arm64 build
+17. APK内の単一GGUF + `libzenzjni.so`
+18. APK artifact upload
 
 ---
 
 ## バージョン履歴
 
+### v0.10.4
+
+- Zenzai runtimeをprocess-wide共有へ変更
+- native inferenceとIME teardownのclose競合を回避
+- InputView終了時のPulse / animation / View参照を解放
+- `変換` → `空白`
+- Enterでひらがなのまま確定
+- 修飾キー: 中央=小文字 / 左=濁点 / 右=半濁点
+- 候補選択時に `候補 wwww` コメント演出
+- Bottom Glowの上方向フェザーを拡張
+- 下部navigation UIとの重なりを調整
+
 ### v0.10.3
 
-- Audio Pulseのピーク天井を引き上げ
-- オレンジを上端ピーク付近に限定
-- Process-local `AudioPulseState` を追加
+- Audio Pulse peak headroom改善
+- Process-local `AudioPulseState`
 - Audio Pulse hot pathからSharedPreferences I/Oを削除
-- AudioRecord失敗時の安全停止を強化
+- AudioRecord失敗時の安全停止
 - Pulse pollingを25fpsへ軽量化
-- 固定44dp bottom paddingを廃止
-- navigation bar inset + 8dp minimumへ変更
-- Pulse背景を実測keyboard heightへ追従
 
 ### v0.10.2
 
 - 無音時を黒へ
 - 通常キー面を透明化
 - 下端光源のLinearGradient + RadialGradient
-- RMSのdBスケーリング
-- silence gate追加
 
 ### v0.10.1
 
 - 数字ファンを廃止
 - `123` → 4×4数字キーパッド
 - Audio Pulseをキー領域限定へ変更
-- RMS + instantaneous peak
 
 ### v0.10.0
 
@@ -374,7 +373,6 @@ CIでは以下を自動検証します。
 - Zenzai v3.2-small単一モデル化
 - 95.1M parameters
 - 10-wayニューラル推論
-- ローカル個人学習
 
 ### v0.8.x
 
