@@ -1,6 +1,7 @@
 package com.ikegami.transformerime
 
 import com.ikegami.transformerime.conversion.CandidateGenerator
+import com.ikegami.transformerime.conversion.NextCandidateGenerator
 import com.ikegami.transformerime.ime.FlickDirection
 import com.ikegami.transformerime.ime.FlickKana
 import com.ikegami.transformerime.model.MediumMoETransformer
@@ -39,6 +40,16 @@ class ConversionAndModelTest {
         assertEquals("は", FlickKana.modifyLast("ぱ"))
         assertEquals("っ", FlickKana.modifyLast("づ"))
         assertEquals("ゃ", FlickKana.modifyLast("や"))
+    }
+
+    @Test
+    fun nextCandidatePoolUsesCommittedContext() {
+        val afterYoroshiku = NextCandidateGenerator.candidates("確認しました。よろしく", emptyList())
+        assertEquals("お願いします", afterYoroshiku.first())
+
+        val afterThanks = NextCandidateGenerator.candidates("ありがとうございます", emptyList())
+        assertTrue(afterThanks.take(4).contains("！"))
+        assertTrue(afterThanks.contains("よろしくお願いします"))
     }
 
     @Test
