@@ -1,7 +1,12 @@
 package com.ikegami.transformerime.ime
 
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RadialGradient
+import android.graphics.Shader
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
 import android.os.Handler
@@ -17,23 +22,34 @@ import android.view.inputmethod.EditorInfo
 import android.inputmethodservice.InputMethodService
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.GridLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.PopupWindow
+import android.widget.ScrollView
 import android.widget.TextView
+import com.ikegami.transformerime.audio.AudioPulseService
 import com.ikegami.transformerime.conversion.CandidateGenerator
+import com.ikegami.transformerime.conversion.EnglishPredictor
 import com.ikegami.transformerime.conversion.NextCandidateGenerator
 import com.ikegami.transformerime.learning.UserLearningStore
 import com.ikegami.transformerime.model.MediumMoETransformer
 import com.ikegami.transformerime.model.ModelRepository
 import com.ikegami.transformerime.model.TinyTransformerModel
 import java.util.concurrent.Executors
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 
 class TransformerImeService : InputMethodService() {
     private val compositionBuffer = StringBuilder()
+    private val englishBuffer = StringBuilder()
     private var compositionContext = ""
+    private var englishContext = ""
     private var candidateRow: LinearLayout? = null
     private var keyboardContainer: LinearLayout? = null
+    private var pulseBackground: AudioPulseBackgroundView? = null
     private var japaneseMode = true
     private var englishShift = false
     private var secureField = false
@@ -46,10 +62,21 @@ class TransformerImeService : InputMethodService() {
     @Volatile private var mediumModel: MediumMoETransformer? = null
     private var pendingMediumRerank: Runnable? = null
     private var pendingNextPrediction: Runnable? = null
+    private var deleteRepeat: Runnable? = null
     private var candidateEpoch = 0
     private var predictionEpoch = 0
     private var currentReading = ""
     private var currentCandidates: List<String> = emptyList()
+
+    private val pulseRunnable = object : Runnable {
+        override fun run() {
+            val prefs = getSharedPreferences(AudioPulseService.PREFS, Context.MODE_PRIVATE)
+            val enabled = prefs.getBoolean(AudioPulseService.KEY_ENABLED, false)
+            val level = if (enabled) prefs.getFloat(AudioPulseService.KEY_LEVEL, 0f) else 0f
+            pulseBackground?.setPulse(level)
+            if (pulseBackground != null) mainHandler.postDelayed(this, 33L)
+        }
+    }
 
     private fun Int.dp(): Int = (this * resources.displayMetrics.density).toInt()
 
@@ -66,6 +93,8 @@ class TransformerImeService : InputMethodService() {
     override fun onDestroy() {
         cancelPendingRerank()
         cancelPendingNextPrediction()
+        stopDeleteRepeat()
+        mainHandler.removeCallbacks(pulseRunnable)
         runCatching { mediumModel?.close() }
         runCatching { learningStore?.close() }
         inferenceExecutor.shutdownNow()
@@ -77,7 +106,9 @@ class TransformerImeService : InputMethodService() {
         cancelPendingRerank()
         cancelPendingNextPrediction()
         compositionBuffer.clear()
+        englishBuffer.clear()
         compositionContext = ""
+        englishContext = ""
         currentReading = ""
         currentCandidates = emptyList()
         secureField = attribute?.let(::isPasswordField) ?: false
@@ -88,8 +119,11 @@ class TransformerImeService : InputMethodService() {
     override fun onFinishInput() {
         cancelPendingRerank()
         cancelPendingNextPrediction()
+        stopDeleteRepeat()
         compositionBuffer.clear()
+        englishBuffer.clear()
         compositionContext = ""
+        englishContext = ""
         currentReading = ""
         currentCandidates = emptyList()
         candidateRow?.removeAllViews()
@@ -97,20 +131,22 @@ class TransformerImeService : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
-        val side = 0
-        val top = 0
         val minimumBottomSafe = 44.dp()
-        val root = LinearLayout(this).apply {
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        pulseBackground = AudioPulseBackgroundView(this)
+        root.addView(pulseBackground, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+
+        val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(side, top, side, minimumBottomSafe)
-            setBackgroundColor(BLACK)
+            setPadding(0, 0, 0, minimumBottomSafe)
+            setBackgroundColor(Color.TRANSPARENT)
             setOnApplyWindowInsetsListener { view, insets ->
                 val nav = insets.getInsets(WindowInsets.Type.navigationBars())
                 val gestures = insets.getInsets(WindowInsets.Type.systemGestures())
                 val mandatory = insets.getInsets(WindowInsets.Type.mandatorySystemGestures())
                 val tappable = insets.getInsets(WindowInsets.Type.tappableElement())
-                val reportedBottom = maxOf(nav.bottom, gestures.bottom, mandatory.bottom, tappable.bottom)
-                view.setPadding(side, top, side, maxOf(minimumBottomSafe, reportedBottom + 8.dp()))
+                val bottom = maxOf(nav.bottom, gestures.bottom, mandatory.bottom, tappable.bottom)
+                view.setPadding(0, 0, 0, maxOf(minimumBottomSafe, bottom + 8.dp()))
                 insets
             }
         }
@@ -118,31 +154,35 @@ class TransformerImeService : InputMethodService() {
         val candidateHost = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(CANDIDATE_BG)
+            setBackgroundColor(Color.argb(235, 45, 45, 45))
         }
         val scroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
-            setBackgroundColor(CANDIDATE_BG)
+            setBackgroundColor(Color.TRANSPARENT)
         }
         candidateRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(6.dp(), 0, 6.dp(), 0)
-            setBackgroundColor(CANDIDATE_BG)
+            setBackgroundColor(Color.TRANSPARENT)
         }
         scroll.addView(candidateRow, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 50.dp()))
         candidateHost.addView(scroll, LinearLayout.LayoutParams(0, 50.dp(), 1f))
-        root.addView(candidateHost, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 50.dp()))
+        content.addView(candidateHost, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 50.dp()))
 
         keyboardContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(BLACK)
+            setBackgroundColor(Color.TRANSPARENT)
         }
-        root.addView(keyboardContainer, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        content.addView(keyboardContainer, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        root.addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+
         renderKeyboard()
-        root.requestApplyInsets()
-        postNextPredictions()
+        content.requestApplyInsets()
+        mainHandler.removeCallbacks(pulseRunnable)
+        mainHandler.post(pulseRunnable)
+        if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
         return root
     }
 
@@ -152,15 +192,22 @@ class TransformerImeService : InputMethodService() {
         if (japaneseMode) buildJapaneseFlickKeyboard(container) else buildEnglishQwertyKeyboard(container)
     }
 
-    private fun buildJapaneseFlickKeyboard(root: LinearLayout) {
-        addJapaneseRow(root, "↶", listOf("あ", "か", "さ"), "⌫", ::handleUndo, ::handleBackspace)
-        addJapaneseRow(root, "◀", listOf("た", "な", "は"), "▶", { handleCursor(-1) }, { handleCursor(1) })
-        addJapaneseRow(root, "☺記", listOf("ま", "や", "ら"), "変換", ::showSymbolCandidates, ::handleConversionKey)
+    // ------------------------------------------------------------
+    // Japanese keyboard / emoji / numeric panels
+    // ------------------------------------------------------------
 
-        val bottom = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(BLACK)
-        }
+    private fun buildJapaneseFlickKeyboard(root: LinearLayout) {
+        addJapaneseRow(root, "↶", listOf("あ", "か", "さ"), deleteRepeatButton(), ::handleUndo)
+
+        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(Color.TRANSPARENT) }
+        row2.addView(functionButton("😊") { renderEmojiPanel() }, japaneseSideParams())
+        listOf("た", "な", "は").forEach { row2.addView(flickButton(it), japaneseCenterParams()) }
+        row2.addView(numberMenuButton(), japaneseSideParams())
+        root.addView(row2, japaneseRowParams())
+
+        addJapaneseRow(root, "記号", listOf("ま", "や", "ら"), functionButton("変換") { handleConversionKey() }, ::showSymbolCandidates)
+
+        val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(Color.TRANSPARENT) }
         bottom.addView(functionButton("あa1", pill = true) { toggleMode(false) }, japaneseSideParams())
         bottom.addView(functionButton("゛゜\n大小") { handleKanaModifier() }, japaneseCenterParams())
         bottom.addView(flickButton("わ"), japaneseCenterParams())
@@ -173,26 +220,147 @@ class TransformerImeService : InputMethodService() {
         root: LinearLayout,
         leftLabel: String,
         kanaLabels: List<String>,
-        rightLabel: String,
-        leftAction: () -> Unit,
-        rightAction: () -> Unit
+        rightView: View,
+        leftAction: () -> Unit
     ) {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(BLACK)
-        }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(Color.TRANSPARENT) }
         row.addView(functionButton(leftLabel) { leftAction() }, japaneseSideParams())
-        kanaLabels.forEach { label -> row.addView(flickButton(label), japaneseCenterParams()) }
-        row.addView(functionButton(rightLabel) { rightAction() }, japaneseSideParams())
+        kanaLabels.forEach { row.addView(flickButton(it), japaneseCenterParams()) }
+        row.addView(rightView, japaneseSideParams())
         root.addView(row, japaneseRowParams())
     }
+
+    private fun renderEmojiPanel() {
+        val root = keyboardContainer ?: return
+        root.removeAllViews()
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        header.addView(functionButton("← かな") { renderKeyboard() }, LinearLayout.LayoutParams(0, 48.dp(), 1f))
+        header.addView(TextView(this).apply {
+            text = "絵文字"
+            textSize = 17f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+        }, LinearLayout.LayoutParams(0, 48.dp(), 2f))
+        header.addView(functionButton("⌫") { handleBackspace() }, LinearLayout.LayoutParams(0, 48.dp(), 1f))
+        root.addView(header)
+
+        val recent = emojiRecents()
+        val all = (recent + EMOJIS).distinct()
+        val grid = GridLayout(this).apply { columnCount = 7; setPadding(6.dp(), 4.dp(), 6.dp(), 8.dp()) }
+        all.forEach { emoji ->
+            grid.addView(TextView(this).apply {
+                text = emoji
+                textSize = 28f
+                gravity = Gravity.CENTER
+                setOnClickListener {
+                    currentInputConnection?.commitText(emoji, 1)
+                    rememberEmoji(emoji)
+                    postNextPredictions()
+                }
+            }, GridLayout.LayoutParams().apply { width = 50.dp(); height = 48.dp() })
+        }
+        root.addView(ScrollView(this).apply { addView(grid) }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 192.dp()))
+    }
+
+    private fun renderNumberPanel() {
+        val root = keyboardContainer ?: return
+        root.removeAllViews()
+        val values = listOf("1","2","3","4","5","6","7","8","9","0","-","/",":",";","(", ")","¥","&","@","\"",".",",","?","!","'","#","%","+")
+        val grid = GridLayout(this).apply { columnCount = 7; setPadding(6.dp(), 4.dp(), 6.dp(), 4.dp()) }
+        values.forEach { value ->
+            grid.addView(panelKey(value) { commitDirect(value) }, GridLayout.LayoutParams().apply { width = 50.dp(); height = 48.dp() })
+        }
+        root.addView(grid, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 192.dp()))
+        val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        bottom.addView(functionButton("← かな") { renderKeyboard() }, LinearLayout.LayoutParams(0, 54.dp(), 1f))
+        bottom.addView(functionButton("space") { commitDirect(" ") }, LinearLayout.LayoutParams(0, 54.dp(), 2f))
+        bottom.addView(deleteRepeatButton(), LinearLayout.LayoutParams(0, 54.dp(), 1f))
+        root.addView(bottom)
+    }
+
+    private fun numberMenuButton(): Button = functionButton("123").apply {
+        setOnClickListener { renderNumberPanel() }
+        setOnLongClickListener {
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            showNumberFan(this)
+            true
+        }
+    }
+
+    private fun showNumberFan(anchor: View) {
+        val width = 310.dp()
+        val height = 180.dp()
+        val frame = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.argb(245, 35, 35, 35))
+                cornerRadius = 28.dp().toFloat()
+                setStroke(1.dp(), Color.rgb(90, 90, 90))
+            }
+        }
+        val radius = 115.dp().toFloat()
+        val cx = width / 2f
+        val cy = height - 26.dp().toFloat()
+        (0..9).forEach { digit ->
+            val angle = PI + (PI * digit / 9.0)
+            val x = cx + cos(angle).toFloat() * radius
+            val y = cy + sin(angle).toFloat() * radius
+            val key = panelKey(digit.toString()) {
+                commitDirect(digit.toString())
+            }
+            frame.addView(key, FrameLayout.LayoutParams(42.dp(), 42.dp()).apply {
+                leftMargin = (x - 21.dp()).toInt()
+                topMargin = (y - 21.dp()).toInt()
+            })
+        }
+        val popup = PopupWindow(frame, width, height, true).apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            isOutsideTouchable = true
+            elevation = 12.dp().toFloat()
+        }
+        frame.setTag(popup)
+        frame.touchables
+        popup.showAsDropDown(anchor, -width + anchor.width + 4.dp(), -height - anchor.height - 4.dp())
+        frame.children().forEach { child ->
+            child.setOnClickListener {
+                val text = (child as TextView).text.toString()
+                commitDirect(text)
+                popup.dismiss()
+            }
+        }
+    }
+
+    private fun FrameLayout.children(): List<View> = (0 until childCount).map { getChildAt(it) }
+
+    private fun panelKey(label: String, action: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 20f
+        gravity = Gravity.CENTER
+        setTextColor(Color.WHITE)
+        background = GradientDrawable().apply {
+            setColor(Color.argb(225, 12, 12, 12))
+            cornerRadius = 22.dp().toFloat()
+        }
+        setOnClickListener { action() }
+    }
+
+    private fun emojiRecents(): List<String> = getSharedPreferences("transformer_ime", Context.MODE_PRIVATE)
+        .getString("emoji_recent", "").orEmpty().split('\u0001').filter { it.isNotBlank() }
+
+    private fun rememberEmoji(emoji: String) {
+        val recent = (listOf(emoji) + emojiRecents()).distinct().take(18)
+        getSharedPreferences("transformer_ime", Context.MODE_PRIVATE).edit()
+            .putString("emoji_recent", recent.joinToString("\u0001")).apply()
+    }
+
+    // ------------------------------------------------------------
+    // Flick + key helpers
+    // ------------------------------------------------------------
 
     private fun flickButton(label: String): Button {
         val set = requireNotNull(FlickKana.keys[label])
         var downX = 0f
         var downY = 0f
         val threshold = 22.dp().toFloat()
-
         return darkButton(label, large = true).apply {
             contentDescription = "$label 左${set.left} 上${set.up} 右${set.right} 下${set.down}"
             setOnClickListener { }
@@ -203,36 +371,18 @@ class TransformerImeService : InputMethodService() {
                     if (abs(dx) < threshold && abs(dy) < threshold) return FlickDirection.CENTER
                     return if (abs(dx) >= abs(dy)) {
                         if (dx < 0) FlickDirection.LEFT else FlickDirection.RIGHT
-                    } else {
-                        if (dy < 0) FlickDirection.UP else FlickDirection.DOWN
-                    }
+                    } else if (dy < 0) FlickDirection.UP else FlickDirection.DOWN
                 }
                 when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        cancelPendingNextPrediction()
-                        downX = event.x
-                        downY = event.y
-                        isPressed = true
-                        true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        text = set.value(direction(event.x, event.y))
-                        true
-                    }
+                    MotionEvent.ACTION_DOWN -> { cancelPendingNextPrediction(); downX = event.x; downY = event.y; isPressed = true; true }
+                    MotionEvent.ACTION_MOVE -> { text = set.value(direction(event.x, event.y)); true }
                     MotionEvent.ACTION_UP -> {
                         val output = set.value(direction(event.x, event.y))
-                        text = label
-                        isPressed = false
-                        view.performClick()
+                        text = label; isPressed = false; view.performClick()
                         view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        handleFlickOutput(output)
-                        true
+                        handleFlickOutput(output); true
                     }
-                    MotionEvent.ACTION_CANCEL -> {
-                        text = label
-                        isPressed = false
-                        true
-                    }
+                    MotionEvent.ACTION_CANCEL -> { text = label; isPressed = false; true }
                     else -> true
                 }
             }
@@ -240,49 +390,74 @@ class TransformerImeService : InputMethodService() {
     }
 
     private fun functionButton(label: String, pill: Boolean = false, accent: Boolean = false, action: () -> Unit): Button =
-        darkButton(label, large = false, pill = pill, accent = accent).apply {
-            setOnClickListener {
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                action()
+        darkButton(label, false, pill, accent).apply {
+            setOnClickListener { performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); action() }
+        }
+
+    private fun deleteRepeatButton(): Button = darkButton("⌫", false).apply {
+        setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    handleBackspace()
+                    startDeleteRepeat()
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { stopDeleteRepeat(); true }
+                else -> true
             }
         }
+    }
 
-    private fun darkButton(label: String, large: Boolean, pill: Boolean = false, accent: Boolean = false): Button =
-        Button(this).apply {
-            text = label
-            textSize = if (large) 26f else if (label.length > 3) 14f else 19f
-            setTextColor(Color.rgb(238, 238, 238))
-            gravity = Gravity.CENTER
-            isAllCaps = false
-            minWidth = 0
-            minimumWidth = 0
-            minHeight = 0
-            minimumHeight = 0
-            setPadding(0, 0, 0, 0)
-            background = keyStateDrawable(pill, accent)
+    private fun startDeleteRepeat() {
+        stopDeleteRepeat()
+        var repeats = 0
+        val runnable = object : Runnable {
+            override fun run() {
+                handleBackspace()
+                repeats++
+                mainHandler.postDelayed(this, if (repeats > 12) 32L else 58L)
+            }
         }
+        deleteRepeat = runnable
+        mainHandler.postDelayed(runnable, 360L)
+    }
+
+    private fun stopDeleteRepeat() {
+        deleteRepeat?.let(mainHandler::removeCallbacks)
+        deleteRepeat = null
+    }
+
+    private fun darkButton(label: String, large: Boolean, pill: Boolean = false, accent: Boolean = false): Button = Button(this).apply {
+        text = label
+        textSize = if (large) 26f else if (label.length > 3) 14f else 19f
+        setTextColor(Color.rgb(238, 238, 238))
+        gravity = Gravity.CENTER
+        isAllCaps = false
+        minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+        setPadding(0, 0, 0, 0)
+        background = keyStateDrawable(pill, accent)
+    }
 
     private fun keyStateDrawable(pill: Boolean, accent: Boolean): StateListDrawable {
-        fun shape(color: Int): GradientDrawable = GradientDrawable().apply {
+        fun shape(color: Int) = GradientDrawable().apply {
             setColor(color)
             cornerRadius = if (pill || accent) 26.dp().toFloat() else 0f
             if (!pill && !accent) setStroke(1, GRID_LINE)
         }
         return StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_pressed), shape(if (accent) ACCENT_PRESSED else PRESSED))
-            addState(intArrayOf(), shape(if (accent) ACCENT else if (pill) MODE_PILL else BLACK))
+            addState(intArrayOf(), shape(if (accent) ACCENT else if (pill) MODE_PILL else KEY_BLACK))
         }
     }
 
     private fun handleFlickOutput(output: String) {
-        if (output in setOf("、", "。", "？", "！", "…", "「", "」", "〜")) handlePunctuation(output)
-        else handleKana(output)
+        if (output in setOf("、", "。", "？", "！", "…", "「", "」", "〜")) handlePunctuation(output) else handleKana(output)
     }
 
     private fun handleKana(kana: String) {
         if (!japaneseMode) return
-        cancelPendingNextPrediction()
-        cancelPendingRerank()
+        cancelPendingNextPrediction(); cancelPendingRerank()
         if (compositionBuffer.isEmpty()) compositionContext = textBeforeCursor()
         compositionBuffer.append(kana)
         refreshCompositionAndCandidates()
@@ -290,67 +465,49 @@ class TransformerImeService : InputMethodService() {
 
     private fun handleKanaModifier() {
         if (compositionBuffer.isEmpty()) return
-        cancelPendingNextPrediction()
-        cancelPendingRerank()
+        cancelPendingNextPrediction(); cancelPendingRerank()
         val modified = FlickKana.modifyLast(compositionBuffer.toString())
         if (modified != compositionBuffer.toString()) {
-            compositionBuffer.clear()
-            compositionBuffer.append(modified)
-            refreshCompositionAndCandidates()
+            compositionBuffer.clear(); compositionBuffer.append(modified); refreshCompositionAndCandidates()
         }
     }
 
     private fun handleUndo() {
         cancelPendingNextPrediction()
         currentInputConnection?.performContextMenuAction(android.R.id.undo)
-        postNextPredictions()
-    }
-
-    private fun handleCursor(delta: Int) {
-        cancelPendingNextPrediction()
-        val keyCode = if (delta < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT
-        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-        postNextPredictions()
+        if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
     }
 
     private fun showSymbolCandidates() {
         cancelPendingNextPrediction()
         val symbols = listOf("。", "、", "！", "？", "…", "〜", "・", "「", "」", "（", "）", "＠", "＃", "＆")
-        showCandidates(symbols, null) { symbol ->
-            currentInputConnection?.commitText(symbol, 1)
-            postNextPredictions()
-        }
+        showCandidates(symbols, null) { commitDirect(it) }
     }
 
     private fun handleConversionKey() {
         cancelPendingNextPrediction()
         if (compositionBuffer.isNotEmpty()) commitCandidate(currentCandidates.firstOrNull() ?: currentReading)
-        else {
-            currentInputConnection?.commitText(" ", 1)
-            postNextPredictions()
-        }
+        else commitDirect(" ")
     }
 
+    // ------------------------------------------------------------
+    // English QWERTY + completion / next-word prediction
+    // ------------------------------------------------------------
+
     private fun buildEnglishQwertyKeyboard(root: LinearLayout) {
-        addEnglishLetterRow(root, listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"))
-        addEnglishLetterRow(root, listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"), 13)
-        val third = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(BLACK) }
-        third.addView(qwertyButton(if (englishShift) "⇧●" else "⇧", 1.25f) {
-            englishShift = !englishShift
-            renderKeyboard()
-        })
-        listOf("z", "x", "c", "v", "b", "n", "m").forEach { letter ->
-            third.addView(qwertyButton(displayEnglishLetter(letter), 1f) { handleEnglishLetter(letter) })
-        }
-        third.addView(qwertyButton("⌫", 1.25f) { handleBackspace() })
+        addEnglishLetterRow(root, listOf("q","w","e","r","t","y","u","i","o","p"))
+        addEnglishLetterRow(root, listOf("a","s","d","f","g","h","j","k","l"), 13)
+        val third = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(Color.TRANSPARENT) }
+        third.addView(qwertyButton(if (englishShift) "⇧●" else "⇧", 1.25f) { englishShift = !englishShift; renderKeyboard() })
+        listOf("z","x","c","v","b","n","m").forEach { letter -> third.addView(qwertyButton(displayEnglishLetter(letter), 1f) { handleEnglishLetter(letter) }) }
+        third.addView(qwertyDeleteButton(1.25f))
         root.addView(third, qwertyRowParams())
 
-        val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(BLACK) }
+        val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(Color.TRANSPARENT) }
         bottom.addView(qwertyButton("かな", 1.2f) { toggleMode(true) })
-        bottom.addView(qwertyButton(",", 0.8f) { commitEnglishText(",") })
-        bottom.addView(qwertyButton("space", 3.3f) { commitEnglishText(" ") })
-        bottom.addView(qwertyButton(".", 0.8f) { commitEnglishText(".") })
+        bottom.addView(qwertyButton(",", 0.8f) { commitEnglishPunctuation(",") })
+        bottom.addView(qwertyButton("space", 3.3f) { handleEnglishSpace() })
+        bottom.addView(qwertyButton(".", 0.8f) { commitEnglishPunctuation(".") })
         bottom.addView(qwertyButton("↵", 1.2f, accent = true) { handleEnter() })
         root.addView(bottom, qwertyRowParams())
     }
@@ -359,113 +516,153 @@ class TransformerImeService : InputMethodService() {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(horizontalPadding.dp(), 0, horizontalPadding.dp(), 0)
-            setBackgroundColor(BLACK)
+            setBackgroundColor(Color.TRANSPARENT)
         }
-        letters.forEach { letter -> row.addView(qwertyButton(displayEnglishLetter(letter), 1f) { handleEnglishLetter(letter) }) }
+        letters.forEach { row.addView(qwertyButton(displayEnglishLetter(it), 1f) { handleEnglishLetter(it) }) }
         root.addView(row, qwertyRowParams())
     }
 
     private fun qwertyButton(label: String, weight: Float, accent: Boolean = false, action: () -> Unit): Button =
         Button(this).apply {
-            text = label
-            textSize = if (label.length > 4) 12f else 18f
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            minWidth = 0
-            minimumWidth = 0
-            minHeight = 0
-            minimumHeight = 0
-            setPadding(1.dp(), 0, 1.dp(), 0)
-            background = qwertyStateDrawable(accent)
-            setOnClickListener { action() }
-        }.also {
-            it.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, weight).apply {
-                marginStart = 2.dp(); marginEnd = 2.dp(); topMargin = 2.dp(); bottomMargin = 2.dp()
-            }
-        }
+            text = label; textSize = if (label.length > 4) 12f else 18f; setTextColor(Color.WHITE); isAllCaps = false
+            minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0; setPadding(1.dp(), 0, 1.dp(), 0)
+            background = qwertyStateDrawable(accent); setOnClickListener { action() }
+        }.also { it.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, weight).apply {
+            marginStart = 2.dp(); marginEnd = 2.dp(); topMargin = 2.dp(); bottomMargin = 2.dp()
+        } }
 
-    private fun qwertyStateDrawable(accent: Boolean): StateListDrawable {
-        fun shape(color: Int): GradientDrawable = GradientDrawable().apply {
-            setColor(color)
-            cornerRadius = 6.dp().toFloat()
-        }
-        return StateListDrawable().apply {
-            addState(intArrayOf(android.R.attr.state_pressed), shape(if (accent) ACCENT_PRESSED else Color.rgb(78, 78, 78)))
-            addState(intArrayOf(), shape(if (accent) ACCENT else Color.rgb(48, 48, 48)))
+    private fun qwertyDeleteButton(weight: Float): Button = qwertyButton("⌫", weight) {}.apply {
+        setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { handleBackspace(); startDeleteRepeat(); true }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { stopDeleteRepeat(); true }
+                else -> true
+            }
         }
     }
 
-    private fun displayEnglishLetter(letter: String): String = if (englishShift) letter.uppercase() else letter
+    private fun qwertyStateDrawable(accent: Boolean): StateListDrawable {
+        fun shape(color: Int) = GradientDrawable().apply { setColor(color); cornerRadius = 6.dp().toFloat() }
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), shape(if (accent) ACCENT_PRESSED else Color.argb(235, 78, 78, 78)))
+            addState(intArrayOf(), shape(if (accent) ACCENT else Color.argb(225, 38, 38, 38)))
+        }
+    }
+
+    private fun displayEnglishLetter(letter: String) = if (englishShift) letter.uppercase() else letter
 
     private fun handleEnglishLetter(letter: String) {
         cancelPendingNextPrediction()
+        if (englishBuffer.isEmpty()) englishContext = textBeforeCursor()
         val value = if (englishShift) letter.uppercase() else letter
-        currentInputConnection?.commitText(value, 1)
-        if (englishShift) {
-            englishShift = false
-            renderKeyboard()
+        englishBuffer.append(value)
+        currentInputConnection?.setComposingText(englishBuffer.toString(), 1)
+        englishShift = false
+        showEnglishSuggestions()
+    }
+
+    private fun showEnglishSuggestions() {
+        val prefix = englishBuffer.toString()
+        if (prefix.isBlank()) { postEnglishNextPredictions(); return }
+        val rag = if (!secureField) learningStore?.retrieveEnglish(prefix, englishContext, 8).orEmpty() else emptyList()
+        val base = EnglishPredictor.suggestions(prefix, englishContext, 10)
+        val pool = (rag + base).filter { it.isNotBlank() }.distinct()
+        val ranked = if (!secureField) learningStore?.rankEnglish(prefix, englishContext, pool) ?: pool else pool
+        currentCandidates = ranked
+        showCandidates(ranked.take(10), if (rag.isNotEmpty()) "RAG" else null, aiSlots = if (rag.isNotEmpty()) setOf(0) else emptySet()) {
+            commitEnglishCandidate(it)
         }
-        showCandidates(emptyList(), null) { }
     }
 
-    private fun commitEnglishText(text: String) {
-        cancelPendingNextPrediction()
-        currentInputConnection?.commitText(text, 1)
-        showCandidates(emptyList(), null) { }
+    private fun commitEnglishCandidate(word: String) {
+        val prefix = englishBuffer.toString()
+        val context = englishContext
+        if (!secureField) {
+            learningStore?.recordEnglish(prefix, word, context)
+            learningStore?.recordCommitted(context, word)
+        }
+        currentInputConnection?.commitText(word + " ", 1)
+        englishBuffer.clear(); englishContext = ""; currentCandidates = emptyList()
+        postEnglishNextPredictions()
     }
 
-    private fun japaneseRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 60.dp())
-    private fun japaneseSideParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.82f)
-    private fun japaneseCenterParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.18f)
-    private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 55.dp())
+    private fun commitEnglishBuffer(addSpace: Boolean) {
+        if (englishBuffer.isEmpty()) { if (addSpace) currentInputConnection?.commitText(" ", 1); return }
+        val word = englishBuffer.toString()
+        val context = englishContext
+        if (!secureField) {
+            learningStore?.recordEnglish(word, word, context)
+            learningStore?.recordCommitted(context, word)
+        }
+        currentInputConnection?.commitText(word + if (addSpace) " " else "", 1)
+        englishBuffer.clear(); englishContext = ""; currentCandidates = emptyList()
+    }
+
+    private fun handleEnglishSpace() {
+        commitEnglishBuffer(addSpace = true)
+        postEnglishNextPredictions()
+    }
+
+    private fun commitEnglishPunctuation(mark: String) {
+        commitEnglishBuffer(addSpace = false)
+        currentInputConnection?.commitText(mark, 1)
+        postEnglishNextPredictions()
+    }
+
+    private fun postEnglishNextPredictions() {
+        if (japaneseMode || englishBuffer.isNotEmpty()) return
+        val context = textBeforeCursor()
+        val rag = if (!secureField) learningStore?.retrieveEnglish("", context, 8).orEmpty() else emptyList()
+        val base = EnglishPredictor.nextWords(context, 10)
+        val pool = (rag + base).distinct()
+        val ranked = if (!secureField) learningStore?.rankEnglish("", context, pool) ?: pool else pool
+        currentCandidates = ranked
+        showCandidates(ranked.take(10), if (rag.isNotEmpty()) "RAG" else null, aiSlots = if (rag.isNotEmpty()) setOf(0) else emptySet()) {
+            if (!secureField) learningStore?.recordEnglish("", it, context)
+            currentInputConnection?.commitText(it + " ", 1)
+            postEnglishNextPredictions()
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Japanese conversion + Personal RAG + Zenzai
+    // ------------------------------------------------------------
 
     private fun refreshCompositionAndCandidates() {
         val reading = compositionBuffer.toString()
         currentReading = reading
         if (reading.isEmpty()) {
-            currentCandidates = emptyList()
-            currentInputConnection?.finishComposingText()
-            postNextPredictions()
-            return
+            currentCandidates = emptyList(); currentInputConnection?.finishComposingText(); postNextPredictions(); return
         }
-
         currentInputConnection?.setComposingText(reading, 1)
-        val base = CandidateGenerator.candidates(reading)
+        val rag = if (!secureField) learningStore?.retrieveConversions(reading, 6).orEmpty() else emptyList()
+        val base = (rag + CandidateGenerator.candidates(reading)).distinct()
         val personalized = if (!secureField) learningStore?.rankConversions(reading, base) ?: base else base
         val tinyRanked = if (aiActive()) model?.rankCandidates(compositionContext, personalized) ?: personalized else personalized
-        val visible = if (aiActive() && tinyRanked.isNotEmpty()) {
-            forceRawReadingSecond(tinyRanked.first(), reading, tinyRanked.drop(1))
-        } else personalized
+        val visible = if (aiActive() && tinyRanked.isNotEmpty()) forceRawReadingSecond(tinyRanked.first(), reading, tinyRanked.drop(1)) else personalized
         currentCandidates = visible
-        showCandidates(visible, if (aiActive() && visible.isNotEmpty()) "✦" else null, aiSlots = setOf(0)) { commitCandidate(it) }
-        scheduleMediumRerank(reading, tinyRanked)
+        showCandidates(visible, if (aiActive() && visible.isNotEmpty()) if (rag.isNotEmpty()) "✦·R" else "✦" else null, aiSlots = setOf(0)) { commitCandidate(it) }
+        scheduleMediumRerank(reading, (rag + tinyRanked).distinct(), rag.isNotEmpty())
     }
 
-    private fun scheduleMediumRerank(reading: String, candidates: List<String>) {
+    private fun scheduleMediumRerank(reading: String, candidates: List<String>, ragUsed: Boolean) {
         cancelPendingRerank(incrementEpoch = false)
         if (!aiActive() || secureField || candidates.isEmpty()) return
         val medium = mediumModel ?: return
         val epoch = ++candidateEpoch
         val contextSnapshot = compositionContext
-        val candidatesSnapshot = candidates.toList()
-
+        val snapshot = candidates.toList()
         val runnable = Runnable {
             if (epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@Runnable
             inferenceExecutor.execute {
-                val result = runCatching { medium.rerank(contextSnapshot, reading, candidatesSnapshot) }.getOrNull() ?: return@execute
-                val rawSecond = if (result.candidates.isNotEmpty()) {
-                    forceRawReadingSecond(result.candidates.first(), reading, result.candidates.drop(1))
-                } else result.candidates
+                val result = runCatching { medium.rerank(contextSnapshot, reading, snapshot) }.getOrNull() ?: return@execute
+                val rawSecond = if (result.candidates.isNotEmpty()) forceRawReadingSecond(result.candidates.first(), reading, result.candidates.drop(1)) else result.candidates
                 mainHandler.post {
                     if (epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@post
                     currentCandidates = rawSecond
-                    val modelTag = if (medium.corpusTrained) "✦Z95×10" else "✦Tiny"
                     val dictionaryTag = if (CandidateGenerator.extendedDictionaryReady) "·D" else ""
-                    showCandidates(
-                        rawSecond,
-                        "$modelTag$dictionaryTag ${result.latencyMs}ms",
-                        aiSlots = setOf(0)
-                    ) { commitCandidate(it) }
+                    val ragTag = if (ragUsed) "·R" else ""
+                    showCandidates(rawSecond, "✦Z95×10$dictionaryTag$ragTag ${result.latencyMs}ms", aiSlots = setOf(0)) { commitCandidate(it) }
                 }
             }
         }
@@ -474,151 +671,49 @@ class TransformerImeService : InputMethodService() {
     }
 
     private fun forceRawReadingSecond(aiCandidate: String, reading: String, rest: List<String>): List<String> = buildList {
-        add(aiCandidate)
-        add(reading)
-        rest.forEach { candidate ->
-            if (candidate != aiCandidate && candidate != reading) add(candidate)
-        }
-    }
-
-    private fun cancelPendingRerank(incrementEpoch: Boolean = true) {
-        pendingMediumRerank?.let(mainHandler::removeCallbacks)
-        pendingMediumRerank = null
-        if (incrementEpoch) candidateEpoch++
-    }
-
-    private fun cancelPendingNextPrediction(incrementEpoch: Boolean = true) {
-        pendingNextPrediction?.let(mainHandler::removeCallbacks)
-        pendingNextPrediction = null
-        if (incrementEpoch) predictionEpoch++
-    }
-
-    private fun handleBackspace() {
-        cancelPendingNextPrediction()
-        cancelPendingRerank()
-        if (compositionBuffer.isNotEmpty()) {
-            compositionBuffer.deleteCharAt(compositionBuffer.lastIndex)
-            if (compositionBuffer.isEmpty()) {
-                currentReading = ""
-                currentCandidates = emptyList()
-                currentInputConnection?.setComposingText("", 1)
-                currentInputConnection?.finishComposingText()
-                compositionContext = ""
-                postNextPredictions()
-            } else refreshCompositionAndCandidates()
-            return
-        }
-        currentInputConnection?.deleteSurroundingText(1, 0)
-        if (japaneseMode) postNextPredictions()
-    }
-
-    private fun handleEnter() {
-        cancelPendingNextPrediction()
-        cancelPendingRerank()
-        if (compositionBuffer.isNotEmpty()) {
-            commitCandidate(currentCandidates.firstOrNull() ?: currentReading)
-            return
-        }
-        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
-        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
-        if (japaneseMode) postNextPredictions()
-    }
-
-    private fun handlePunctuation(mark: String) {
-        cancelPendingNextPrediction()
-        cancelPendingRerank()
-        if (compositionBuffer.isNotEmpty()) {
-            val candidate = currentCandidates.firstOrNull() ?: currentReading
-            if (!secureField) learningStore?.recordConversion(currentReading, candidate)
-            currentInputConnection?.commitText(candidate, 1)
-            clearCompositionState()
-        }
-        currentInputConnection?.commitText(mark, 1)
-        postNextPredictions()
-    }
-
-    private fun commitCandidate(candidate: String) {
-        cancelPendingNextPrediction()
-        cancelPendingRerank()
-        val readingSnapshot = currentReading
-        if (!secureField && readingSnapshot.isNotBlank()) learningStore?.recordConversion(readingSnapshot, candidate)
-        currentInputConnection?.commitText(candidate, 1)
-        clearCompositionState()
-        postNextPredictions()
-    }
-
-    private fun clearCompositionState() {
-        compositionBuffer.clear()
-        currentReading = ""
-        currentCandidates = emptyList()
-        compositionContext = ""
-    }
-
-    private fun toggleMode(toJapanese: Boolean) {
-        cancelPendingNextPrediction()
-        cancelPendingRerank()
-        if (compositionBuffer.isNotEmpty()) {
-            val candidate = currentCandidates.firstOrNull() ?: currentReading
-            if (!secureField) learningStore?.recordConversion(currentReading, candidate)
-            currentInputConnection?.commitText(candidate, 1)
-            clearCompositionState()
-        }
-        japaneseMode = toJapanese
-        englishShift = false
-        renderKeyboard()
-        if (japaneseMode) postNextPredictions() else showCandidates(emptyList(), null) { }
-    }
+        add(aiCandidate); add(reading)
+        rest.forEach { if (it != aiCandidate && it != reading) add(it) }
+    }.distinct()
 
     private fun postNextPredictions() {
         cancelPendingNextPrediction(incrementEpoch = false)
         if (!aiActive() || !japaneseMode || compositionBuffer.isNotEmpty()) {
-            if (compositionBuffer.isEmpty()) showCandidates(emptyList(), null) { }
+            if (compositionBuffer.isEmpty() && japaneseMode) showCandidates(emptyList(), null) { }
             return
         }
-
         val context = textBeforeCursor()
-        if (context.isBlank()) {
-            showCandidates(emptyList(), null) { }
-            return
-        }
-
+        if (context.isBlank()) { showCandidates(emptyList(), null) { }; return }
+        val rag = if (!secureField) learningStore?.retrieveNext(context, 8).orEmpty() else emptyList()
         val tiny = model?.predictNext(context, 8).orEmpty().map { it.text }
-        val rawPool = NextCandidateGenerator.candidates(context, tiny)
+        val generated = NextCandidateGenerator.candidates(context, tiny)
+        val rawPool = (rag + generated).filter { it.isNotBlank() }.distinct()
         val pool = if (!secureField) learningStore?.rankNext(context, rawPool) ?: rawPool else rawPool
-        if (pool.isEmpty()) {
-            showCandidates(emptyList(), null) { }
-            return
-        }
-
+        if (pool.isEmpty()) { showCandidates(emptyList(), null) { }; return }
         currentCandidates = pool
-        showCandidates(pool.take(8), "✦次", aiSlots = setOf(0)) { commitPrediction(it) }
-        scheduleMediumNextPrediction(context, pool)
+        showCandidates(pool.take(10), if (rag.isNotEmpty()) "✦次·R" else "✦次", aiSlots = setOf(0)) { commitPrediction(it) }
+        scheduleMediumNextPrediction(context, pool, rag.isNotEmpty())
     }
 
-    private fun scheduleMediumNextPrediction(context: String, candidates: List<String>) {
+    private fun scheduleMediumNextPrediction(context: String, candidates: List<String>, ragUsed: Boolean) {
         val medium = mediumModel ?: return
         if (!aiActive() || candidates.isEmpty()) return
         val epoch = ++predictionEpoch
         val contextTail = context.takeLast(180)
         val pool = candidates.toList()
-
         val runnable = Runnable {
             if (epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@Runnable
             inferenceExecutor.execute {
                 val result = runCatching { medium.rerank(contextTail, "", pool) }.getOrNull() ?: return@execute
-                val personalized = if (!secureField) {
-                    learningStore?.rankNext(contextTail, result.candidates) ?: result.candidates
-                } else result.candidates
+                val ai = result.candidates.firstOrNull()
+                val rest = result.candidates.drop(1)
+                val rankedRest = if (!secureField) learningStore?.rankNext(contextTail, rest) ?: rest else rest
+                val visible = (listOfNotNull(ai) + rankedRest).distinct()
                 mainHandler.post {
                     if (epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@post
                     if (textBeforeCursor().takeLast(180) != contextTail) return@post
-                    currentCandidates = personalized
-                    val modelTag = if (medium.corpusTrained) "✦次Z95×10" else "✦次Tiny"
-                    showCandidates(
-                        personalized.take(10),
-                        "$modelTag ${result.latencyMs}ms",
-                        aiSlots = setOf(0)
-                    ) { commitPrediction(it) }
+                    currentCandidates = visible
+                    val ragTag = if (ragUsed) "·R" else ""
+                    showCandidates(visible.take(10), "✦次Z95×10$ragTag ${result.latencyMs}ms", aiSlots = setOf(0)) { commitPrediction(it) }
                 }
             }
         }
@@ -626,12 +721,103 @@ class TransformerImeService : InputMethodService() {
         mainHandler.postDelayed(runnable, 60L)
     }
 
+    private fun commitCandidate(candidate: String) {
+        cancelPendingNextPrediction(); cancelPendingRerank()
+        val reading = currentReading
+        val context = compositionContext
+        if (!secureField && reading.isNotBlank()) {
+            learningStore?.recordConversion(reading, candidate)
+            learningStore?.recordCommitted(context, candidate)
+        }
+        currentInputConnection?.commitText(candidate, 1)
+        clearCompositionState(); postNextPredictions()
+    }
+
     private fun commitPrediction(prediction: String) {
         cancelPendingNextPrediction()
         val context = textBeforeCursor()
-        if (!secureField && context.isNotBlank()) learningStore?.recordNext(context, prediction)
+        if (!secureField && context.isNotBlank()) {
+            learningStore?.recordNext(context, prediction)
+            learningStore?.recordCommitted(context, prediction)
+        }
         currentInputConnection?.commitText(prediction, 1)
         postNextPredictions()
+    }
+
+    private fun handlePunctuation(mark: String) {
+        cancelPendingNextPrediction(); cancelPendingRerank()
+        if (compositionBuffer.isNotEmpty()) {
+            val candidate = currentCandidates.firstOrNull() ?: currentReading
+            val context = compositionContext
+            if (!secureField) {
+                learningStore?.recordConversion(currentReading, candidate)
+                learningStore?.recordCommitted(context, candidate)
+            }
+            currentInputConnection?.commitText(candidate, 1); clearCompositionState()
+        }
+        currentInputConnection?.commitText(mark, 1); postNextPredictions()
+    }
+
+    // ------------------------------------------------------------
+    // Shared editing / state
+    // ------------------------------------------------------------
+
+    private fun handleBackspace() {
+        cancelPendingNextPrediction(); cancelPendingRerank()
+        if (!japaneseMode && englishBuffer.isNotEmpty()) {
+            englishBuffer.deleteCharAt(englishBuffer.lastIndex)
+            if (englishBuffer.isEmpty()) {
+                currentInputConnection?.setComposingText("", 1); currentInputConnection?.finishComposingText(); englishContext = ""; postEnglishNextPredictions()
+            } else {
+                currentInputConnection?.setComposingText(englishBuffer.toString(), 1); showEnglishSuggestions()
+            }
+            return
+        }
+        if (compositionBuffer.isNotEmpty()) {
+            compositionBuffer.deleteCharAt(compositionBuffer.lastIndex)
+            if (compositionBuffer.isEmpty()) {
+                currentReading = ""; currentCandidates = emptyList(); currentInputConnection?.setComposingText("", 1); currentInputConnection?.finishComposingText(); compositionContext = ""; postNextPredictions()
+            } else refreshCompositionAndCandidates()
+            return
+        }
+        currentInputConnection?.deleteSurroundingText(1, 0)
+        if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
+    }
+
+    private fun handleEnter() {
+        cancelPendingNextPrediction(); cancelPendingRerank()
+        if (!japaneseMode && englishBuffer.isNotEmpty()) commitEnglishBuffer(false)
+        if (compositionBuffer.isNotEmpty()) { commitCandidate(currentCandidates.firstOrNull() ?: currentReading); return }
+        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+        if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
+    }
+
+    private fun commitDirect(text: String) {
+        if (compositionBuffer.isNotEmpty()) commitCandidate(currentCandidates.firstOrNull() ?: currentReading)
+        if (englishBuffer.isNotEmpty()) commitEnglishBuffer(false)
+        currentInputConnection?.commitText(text, 1)
+        if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
+    }
+
+    private fun clearCompositionState() {
+        compositionBuffer.clear(); currentReading = ""; currentCandidates = emptyList(); compositionContext = ""
+    }
+
+    private fun toggleMode(toJapanese: Boolean) {
+        cancelPendingNextPrediction(); cancelPendingRerank()
+        if (compositionBuffer.isNotEmpty()) commitCandidate(currentCandidates.firstOrNull() ?: currentReading)
+        if (englishBuffer.isNotEmpty()) commitEnglishBuffer(false)
+        japaneseMode = toJapanese; englishShift = false; renderKeyboard()
+        if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
+    }
+
+    private fun cancelPendingRerank(incrementEpoch: Boolean = true) {
+        pendingMediumRerank?.let(mainHandler::removeCallbacks); pendingMediumRerank = null; if (incrementEpoch) candidateEpoch++
+    }
+
+    private fun cancelPendingNextPrediction(incrementEpoch: Boolean = true) {
+        pendingNextPrediction?.let(mainHandler::removeCallbacks); pendingNextPrediction = null; if (incrementEpoch) predictionEpoch++
     }
 
     private fun showCandidates(
@@ -642,40 +828,19 @@ class TransformerImeService : InputMethodService() {
     ) {
         val row = candidateRow ?: return
         row.removeAllViews()
-        val orderedAiSlots = aiSlots.filter { it in candidates.indices }.sorted()
         candidates.forEachIndexed { index, candidate ->
-            val aiRank = orderedAiSlots.indexOf(index)
-            val aiHighlighted = aiBadge != null && aiRank >= 0
-            val label = when {
-                !aiHighlighted -> candidate
-                orderedAiSlots.size <= 1 -> "$candidate  $aiBadge"
-                aiRank == 0 -> "$candidate  ✦AI1  $aiBadge"
-                else -> "$candidate  ✦AI${aiRank + 1}"
-            }
+            val highlighted = aiBadge != null && index in aiSlots
+            val label = if (highlighted) "$candidate  $aiBadge" else candidate
             row.addView(TextView(this).apply {
-                text = label
-                textSize = 16f
-                gravity = Gravity.CENTER
-                setTextColor(Color.rgb(235, 235, 235))
-                setPadding(16.dp(), 0, 16.dp(), 0)
-                setBackgroundColor(if (aiHighlighted) Color.rgb(56, 56, 56) else Color.TRANSPARENT)
+                text = label; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.rgb(235,235,235)); setPadding(16.dp(),0,16.dp(),0)
+                setBackgroundColor(if (highlighted) Color.argb(210, 60, 60, 60) else Color.TRANSPARENT)
                 setOnClickListener { onClick(candidate) }
             }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, 42.dp()))
-
-            if (index != candidates.lastIndex) {
-                row.addView(
-                    View(this).apply { setBackgroundColor(Color.rgb(82, 82, 82)) },
-                    LinearLayout.LayoutParams(1.dp(), 24.dp()).apply { gravity = Gravity.CENTER_VERTICAL }
-                )
-            }
+            if (index != candidates.lastIndex) row.addView(View(this).apply { setBackgroundColor(Color.rgb(82,82,82)) }, LinearLayout.LayoutParams(1.dp(),24.dp()).apply { gravity = Gravity.CENTER_VERTICAL })
         }
     }
 
-    private fun textBeforeCursor(): String = currentInputConnection
-        ?.getTextBeforeCursor(240, 0)
-        ?.toString()
-        .orEmpty()
-
+    private fun textBeforeCursor(): String = currentInputConnection?.getTextBeforeCursor(260, 0)?.toString().orEmpty()
     private fun aiActive(): Boolean = aiEnabledByUser && !secureField && model != null
 
     private fun isPasswordField(info: EditorInfo): Boolean {
@@ -683,21 +848,55 @@ class TransformerImeService : InputMethodService() {
         val variation = type and InputType.TYPE_MASK_VARIATION
         val clazz = type and InputType.TYPE_MASK_CLASS
         return when (clazz) {
-            InputType.TYPE_CLASS_TEXT -> variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
-                variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
-                variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
+            InputType.TYPE_CLASS_TEXT -> variation == InputType.TYPE_TEXT_VARIATION_PASSWORD || variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD || variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
             InputType.TYPE_CLASS_NUMBER -> variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
             else -> false
         }
     }
 
+    private fun japaneseRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 60.dp())
+    private fun japaneseSideParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.82f)
+    private fun japaneseCenterParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.18f)
+    private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 55.dp())
+
+    private class AudioPulseBackgroundView(context: Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var pulse = 0f
+        fun setPulse(value: Float) {
+            val v = value.coerceIn(0f, 1f)
+            if (abs(v - pulse) > 0.008f) { pulse = v; invalidate() }
+        }
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            canvas.drawColor(Color.BLACK)
+            if (width <= 0 || height <= 0 || pulse < 0.01f) return
+            val alpha = (35 + pulse * 185).toInt().coerceIn(0, 220)
+            val radius = maxOf(width, height) * (0.55f + pulse * 0.30f)
+            paint.shader = RadialGradient(
+                width * 0.52f, height * 0.50f, radius,
+                intArrayOf(
+                    Color.argb(alpha, 38, 220, 230),
+                    Color.argb((alpha * 0.62f).toInt(), 120, 60, 255),
+                    Color.argb(0, 0, 0, 0)
+                ),
+                floatArrayOf(0f, 0.52f, 1f), Shader.TileMode.CLAMP
+            )
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+            paint.shader = null
+        }
+    }
+
     companion object {
-        private val BLACK = Color.rgb(0, 0, 0)
-        private val CANDIDATE_BG = Color.rgb(48, 48, 48)
-        private val GRID_LINE = Color.rgb(31, 31, 31)
-        private val PRESSED = Color.rgb(70, 70, 70)
-        private val MODE_PILL = Color.rgb(55, 55, 55)
+        private val KEY_BLACK = Color.argb(225, 0, 0, 0)
+        private val GRID_LINE = Color.argb(180, 40, 40, 40)
+        private val PRESSED = Color.argb(240, 70, 70, 70)
+        private val MODE_PILL = Color.argb(230, 55, 55, 55)
         private val ACCENT = Color.rgb(126, 203, 196)
         private val ACCENT_PRESSED = Color.rgb(96, 173, 166)
+        private val EMOJIS = listOf(
+            "😀","😃","😄","😁","😆","😅","😂","🤣","😊","😇","🙂","🙃","😉","😍","🥰","😘","😎","🤓","🫠","🤔","🤯","😴","😭","😡","🥺","😈","👻","💀",
+            "👍","👎","👌","✌️","🤞","🫶","👏","🙏","💪","👀","❤️","🩷","🧡","💛","💚","💙","💜","🖤","🤍","💯","✨","🔥","⚡","🎉","✅","❌","⭐","🌙",
+            "🐶","🐱","🐼","🦊","🐸","🍎","🍓","🍔","🍣","🍺","☕","🚗","✈️","🚀","📷","🎥","💻","📱","🎮","🎧","🧠","🤖","⚙️","🔧","📌","📎","✉️"
+        )
     }
 }
