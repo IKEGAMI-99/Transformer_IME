@@ -73,10 +73,7 @@ void append_utf8(std::string & out, uint32_t cp) {
     }
 }
 
-// JNI's GetStringUTFChars/NewStringUTF use Modified UTF-8, not ordinary UTF-8.
-// llama.cpp consumes and produces ordinary UTF-8 byte streams, so crossing the JNI
-// boundary through Modified UTF-8 is unsafe for supplementary characters and for a
-// generation that stops in the middle of a multi-byte token piece.
+// Java strings are UTF-16 while llama.cpp consumes ordinary UTF-8. Avoid JNI Modified UTF-8.
 std::string jstring_to_utf8(JNIEnv * env, jstring value) {
     if (!value) return {};
     const jsize length = env->GetStringLength(value);
@@ -112,10 +109,7 @@ bool continuation(uint8_t b) {
     return (b & 0xC0) == 0x80;
 }
 
-// Lossy but crash-proof UTF-8 -> Java UTF-16 conversion.
-// A truncated tail is dropped because llama token pieces may stop mid-codepoint when
-// max_tokens is reached. Invalid bytes inside the stream become U+FFFD. This is done
-// before JNI sees the data, so CheckJNI can never abort on malformed Modified UTF-8.
+// Crash-proof ordinary UTF-8 -> Java UTF-16. A truncated final codepoint is dropped.
 jstring utf8_to_jstring(JNIEnv * env, const std::string & text) {
     std::vector<jchar> utf16;
     utf16.reserve(text.size());
@@ -128,16 +122,11 @@ jstring utf8_to_jstring(JNIEnv * env, const std::string & text) {
         uint32_t cp = 0;
         size_t need = 0;
 
-        if (b0 <= 0x7F) {
-            cp = b0;
-            need = 1;
-        } else if (b0 >= 0xC2 && b0 <= 0xDF) {
-            need = 2;
-        } else if (b0 >= 0xE0 && b0 <= 0xEF) {
-            need = 3;
-        } else if (b0 >= 0xF0 && b0 <= 0xF4) {
-            need = 4;
-        } else {
+        if (b0 <= 0x7F) { cp = b0; need = 1; }
+        else if (b0 >= 0xC2 && b0 <= 0xDF) need = 2;
+        else if (b0 >= 0xE0 && b0 <= 0xEF) need = 3;
+        else if (b0 >= 0xF0 && b0 <= 0xF4) need = 4;
+        else {
             utf16.push_back(static_cast<jchar>(0xFFFD));
             repaired = true;
             ++i;
@@ -159,23 +148,17 @@ jstring utf8_to_jstring(JNIEnv * env, const std::string & text) {
                  (static_cast<uint8_t>(text[i + 1]) & 0x3F);
         } else if (valid && need == 3) {
             const uint8_t b1 = static_cast<uint8_t>(text[i + 1]);
-            if ((b0 == 0xE0 && b1 < 0xA0) || (b0 == 0xED && b1 >= 0xA0)) {
-                valid = false;
-            } else {
-                cp = ((b0 & 0x0F) << 12) |
-                     ((b1 & 0x3F) << 6) |
-                     (static_cast<uint8_t>(text[i + 2]) & 0x3F);
-            }
+            if ((b0 == 0xE0 && b1 < 0xA0) || (b0 == 0xED && b1 >= 0xA0)) valid = false;
+            else cp = ((b0 & 0x0F) << 12) |
+                      ((b1 & 0x3F) << 6) |
+                      (static_cast<uint8_t>(text[i + 2]) & 0x3F);
         } else if (valid && need == 4) {
             const uint8_t b1 = static_cast<uint8_t>(text[i + 1]);
-            if ((b0 == 0xF0 && b1 < 0x90) || (b0 == 0xF4 && b1 >= 0x90)) {
-                valid = false;
-            } else {
-                cp = ((b0 & 0x07) << 18) |
-                     ((b1 & 0x3F) << 12) |
-                     ((static_cast<uint8_t>(text[i + 2]) & 0x3F) << 6) |
-                     (static_cast<uint8_t>(text[i + 3]) & 0x3F);
-            }
+            if ((b0 == 0xF0 && b1 < 0x90) || (b0 == 0xF4 && b1 >= 0x90)) valid = false;
+            else cp = ((b0 & 0x07) << 18) |
+                      ((b1 & 0x3F) << 12) |
+                      ((static_cast<uint8_t>(text[i + 2]) & 0x3F) << 6) |
+                      (static_cast<uint8_t>(text[i + 3]) & 0x3F);
         }
 
         if (!valid || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
@@ -247,6 +230,11 @@ struct GenerationSet {
     long latency_ms = 0;
 };
 
+struct CandidateScoreSet {
+    std::vector<float> scores;
+    long latency_ms = 0;
+};
+
 bool decode_prompt(Engine & e, const std::vector<llama_token> & prompt_tokens) {
     if (prompt_tokens.empty()) return false;
     llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(prompt_tokens.data()),
@@ -290,10 +278,7 @@ Generation continue_branch(Engine & e, llama_token first_token, int max_tokens, 
     int margin_count = initial_margin > 0.0f ? 1 : 0;
     llama_token next = first_token;
     llama_batch first_batch = llama_batch_get_one(&next, 1);
-    if (llama_decode(e.ctx, first_batch) != 0) {
-        LOGE("forced token decode failed");
-        return out;
-    }
+    if (llama_decode(e.ctx, first_batch) != 0) return out;
 
     for (int step = 1; step < max_tokens; ++step) {
         float * logits = llama_get_logits_ith(e.ctx, -1);
@@ -311,10 +296,7 @@ Generation continue_branch(Engine & e, llama_token first_token, int max_tokens, 
         out.text += piece;
         llama_token greedy = token;
         llama_batch next_batch = llama_batch_get_one(&greedy, 1);
-        if (llama_decode(e.ctx, next_batch) != 0) {
-            LOGE("token decode failed at step %d", step);
-            break;
-        }
+        if (llama_decode(e.ctx, next_batch) != 0) break;
     }
 
     const auto ended = std::chrono::steady_clock::now();
@@ -374,6 +356,106 @@ GenerationSet multi_generate(Engine & e, const std::string & prompt, int max_tok
     return result;
 }
 
+float target_log_probability(const Engine & e, float * logits, llama_token target) {
+    if (!logits || !e.vocab) return -INFINITY;
+    const int32_t n_vocab = llama_vocab_n_tokens(e.vocab);
+    const int32_t target_id = static_cast<int32_t>(target);
+    if (target_id < 0 || target_id >= n_vocab) return -INFINITY;
+
+    float max_logit = -INFINITY;
+    for (int32_t id = 0; id < n_vocab; ++id) {
+        const float v = logits[id];
+        if (std::isfinite(v) && v > max_logit) max_logit = v;
+    }
+    if (!std::isfinite(max_logit) || !std::isfinite(logits[target_id])) return -INFINITY;
+
+    double sum = 0.0;
+    for (int32_t id = 0; id < n_vocab; ++id) {
+        const float v = logits[id];
+        if (std::isfinite(v)) sum += std::exp(static_cast<double>(v - max_logit));
+    }
+    if (!(sum > 0.0)) return -INFINITY;
+    const double log_z = static_cast<double>(max_logit) + std::log(sum);
+    return static_cast<float>(static_cast<double>(logits[target_id]) - log_z);
+}
+
+// Length-normalized log P(candidate | prompt). This is a constrained scorer, not free generation.
+float candidate_log_probability(
+    Engine & e,
+    const std::vector<llama_token> & base_prompt_tokens,
+    const std::string & candidate
+) {
+    if (candidate.empty()) return -INFINITY;
+    auto candidate_tokens = tokenize(e, candidate, false);
+    if (candidate_tokens.empty()) return -INFINITY;
+
+    auto prompt_tokens = base_prompt_tokens;
+    const int32_t n_ctx = static_cast<int32_t>(llama_n_ctx(e.ctx));
+    if (static_cast<int32_t>(prompt_tokens.size() + candidate_tokens.size() + 2) >= n_ctx) {
+        const size_t keep = n_ctx > static_cast<int32_t>(candidate_tokens.size() + 4)
+            ? static_cast<size_t>(n_ctx - candidate_tokens.size() - 4)
+            : 1;
+        if (prompt_tokens.size() > keep) prompt_tokens.erase(prompt_tokens.begin(), prompt_tokens.end() - keep);
+    }
+
+    llama_kv_cache_clear(e.ctx);
+    if (!decode_prompt(e, prompt_tokens)) {
+        llama_kv_cache_clear(e.ctx);
+        return -INFINITY;
+    }
+
+    double total = 0.0;
+    int scored_tokens = 0;
+    for (size_t i = 0; i < candidate_tokens.size(); ++i) {
+        float * logits = llama_get_logits_ith(e.ctx, -1);
+        const float logp = target_log_probability(e, logits, candidate_tokens[i]);
+        if (!std::isfinite(logp)) {
+            llama_kv_cache_clear(e.ctx);
+            return -INFINITY;
+        }
+        total += logp;
+        scored_tokens++;
+
+        if (i + 1 < candidate_tokens.size()) {
+            llama_token forced = candidate_tokens[i];
+            llama_batch batch = llama_batch_get_one(&forced, 1);
+            if (llama_decode(e.ctx, batch) != 0) {
+                llama_kv_cache_clear(e.ctx);
+                return -INFINITY;
+            }
+        }
+    }
+
+    llama_kv_cache_clear(e.ctx);
+    if (scored_tokens <= 0) return -INFINITY;
+    const double length_norm = std::pow(static_cast<double>(scored_tokens), 0.65);
+    return static_cast<float>(total / length_norm);
+}
+
+CandidateScoreSet score_candidate_set(
+    Engine & e,
+    const std::string & prompt,
+    const std::vector<std::string> & candidates,
+    int limit
+) {
+    CandidateScoreSet result;
+    if (!e.model || !e.ctx || !e.vocab || prompt.empty() || candidates.empty()) return result;
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto prompt_tokens = tokenize(e, prompt, true);
+    if (prompt_tokens.empty()) return result;
+
+    const int count = std::min<int>(std::clamp(limit, 1, 24), static_cast<int>(candidates.size()));
+    result.scores.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        result.scores.push_back(candidate_log_probability(e, prompt_tokens, candidates[static_cast<size_t>(i)]));
+    }
+    llama_kv_cache_clear(e.ctx);
+    const auto ended = std::chrono::steady_clock::now();
+    result.latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(ended - started).count();
+    return result;
+}
+
 jobjectArray make_generation_result(JNIEnv * env, const Generation & result) {
     jclass string_class = env->FindClass("java/lang/String");
     jobjectArray array = env->NewObjectArray(3, string_class, nullptr);
@@ -392,6 +474,21 @@ jobjectArray make_generation_set_result(JNIEnv * env, const GenerationSet & resu
     for (const auto & item : result.items) {
         env->SetObjectArrayElement(array, pos++, utf8_to_jstring(env, item.text));
         env->SetObjectArrayElement(array, pos++, utf8_to_jstring(env, std::to_string(item.margin)));
+    }
+    return array;
+}
+
+jobjectArray make_candidate_score_result(JNIEnv * env, const CandidateScoreSet & result) {
+    jclass string_class = env->FindClass("java/lang/String");
+    const jsize size = static_cast<jsize>(1 + result.scores.size());
+    jobjectArray array = env->NewObjectArray(size, string_class, nullptr);
+    env->SetObjectArrayElement(array, 0, utf8_to_jstring(env, std::to_string(result.latency_ms)));
+    for (size_t i = 0; i < result.scores.size(); ++i) {
+        env->SetObjectArrayElement(
+            array,
+            static_cast<jsize>(i + 1),
+            utf8_to_jstring(env, std::to_string(result.scores[i]))
+        );
     }
     return array;
 }
@@ -418,10 +515,7 @@ Java_com_ikegami_transformerime_model_ZenzaiNative_nativeLoadModel(JNIEnv * env,
     mp.use_mlock = false;
     mp.n_gpu_layers = 0;
     e.model = llama_model_load_from_file(path.c_str(), mp);
-    if (!e.model) {
-        LOGE("failed to load model %d", index);
-        return 0;
-    }
+    if (!e.model) return 0;
 
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx = 256;
@@ -431,7 +525,6 @@ Java_com_ikegami_transformerime_model_ZenzaiNative_nativeLoadModel(JNIEnv * env,
     cp.n_threads_batch = cp.n_threads;
     e.ctx = llama_init_from_model(e.model, cp);
     if (!e.ctx) {
-        LOGE("failed to create context %d", index);
         e.clear();
         return 0;
     }
@@ -465,6 +558,35 @@ Java_com_ikegami_transformerime_model_ZenzaiNative_nativeGenerateCandidates(JNIE
     const GenerationSet result = multi_generate(e, prompt,
         std::clamp<int>(max_tokens, 1, 64), std::clamp<int>(branches, 1, 12));
     return make_generation_set_result(env, result);
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_ikegami_transformerime_model_ZenzaiNative_nativeScoreCandidates(
+    JNIEnv * env,
+    jobject,
+    jint index,
+    jstring jprompt,
+    jobjectArray jcandidates,
+    jint limit
+) {
+    if (index < 0 || index > 1 || !jprompt || !jcandidates) return make_candidate_score_result(env, {});
+    Engine & e = g_engines[index];
+    std::lock_guard<std::mutex> guard(e.mutex);
+    const std::string prompt = jstring_to_utf8(env, jprompt);
+    if (prompt.empty()) return make_candidate_score_result(env, {});
+
+    const jsize total = env->GetArrayLength(jcandidates);
+    const int count = std::min<int>(std::clamp<int>(limit, 1, 24), static_cast<int>(total));
+    std::vector<std::string> candidates;
+    candidates.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        jstring item = static_cast<jstring>(env->GetObjectArrayElement(jcandidates, i));
+        candidates.push_back(jstring_to_utf8(env, item));
+        if (item) env->DeleteLocalRef(item);
+    }
+
+    const CandidateScoreSet result = score_candidate_set(e, prompt, candidates, count);
+    return make_candidate_score_result(env, result);
 }
 
 extern "C" JNIEXPORT jlong JNICALL
