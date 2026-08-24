@@ -123,8 +123,8 @@ jobs:
               ('fallback', Path('app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf'), '95.1M', 'CC BY-SA 4.0'),
           ]
           result = {
-              'version': '0.8.0',
-              'design': 'Zenzai-style Mozc draft + neural verification cascade',
+              'version': '0.8.1',
+              'design': 'Zenzai top-branch 3-way conversion + multi-reading next prediction',
               'estimated_total_parameters': 190_200_000,
               'quantization': 'Q5_K_M',
               'models': []
@@ -173,6 +173,12 @@ jobs:
           test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
+      - name: Verify v0.8.1 multi-candidate sources
+        run: |
+          grep -q 'nativeGenerateCandidates' app/src/main/cpp/zenz_jni.cpp
+          grep -q 'AI_CONVERSION_COUNT = 3' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
+          grep -q 'NEXT_PRIMARY_BRANCHES = 4' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -213,13 +219,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.8.0-Zenzai190M-debug
+          name: Transformer-IME-v0.8.1-Zenzai190M-MultiAI-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.8 metadata
+      - name: Upload v0.8.1 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.8.0-metadata
+          name: Transformer-IME-v0.8.1-metadata
           path: |
             app/src/main/assets/zenzai190.meta.json
             app/src/main/assets/mozc_compact.meta.json
