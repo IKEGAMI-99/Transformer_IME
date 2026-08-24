@@ -2,35 +2,74 @@
 
 Android向けの、完全オンデバイスTransformerを組み込んだ日本語IME実験プロジェクトです。
 
-## 現在の状態: v0.3.0
+## 現在の状態: v0.4.0
 
 - Android `InputMethodService` として登録可能
-- QWERTYローマ字入力
-- ローマ字 → ひらがな変換
-- 文節候補を組み合わせるかな漢字変換
-- ビーム探索による複数文節候補生成
+- **日本語は12キー・5方向フリック入力**
+- **英数モードだけQWERTY**（Shift対応）
+- 濁点 / 半濁点 / 小文字切替
+- **Mozc OSS辞書ベースの通常かな漢字変換**
+- 地名・人名・一般語を含む拡張辞書を小型SQLiteとしてオンデバイス検索
+- 文節候補を組み合わせるビーム探索
 - 学習済みTiny Transformerによる即時ランキング / 次語予測
 - **日本語文コーパスで学習した5,022,784 parameter MoE Transformer**による非同期再ランキング
 - 日本語学習済み5M推論完了時に `✦JP5M xxms` を表示
+- 拡張辞書ロード済みの場合はモデル表示に `·D` を追加
 - AI ON/OFF
 - パスワード欄ではAI予測を停止
 - gesture navigation / system gesture / tappable領域を考慮したSafe Area
-- `INTERNET` permissionなし。推論時の通信なし
+- `INTERNET` permissionなし。実機での変換・推論は完全オフライン
 
-## かな漢字変換
+## 入力UI
 
-読みを複数区間に分割し、辞書候補と未変換かなをビーム探索で組み合わせます。
+### 日本語
+
+日本語モードではQWERTYローマ字入力を廃止し、スマートフォン向けのフリック入力に変更しました。
+
+基本方向:
 
 ```text
-きょうはてんきがいい
-  ↓
-今日は天気が良い
-今日は天気がいい
-きょうは天気が良い
-...
+       ↑ う
+左 い   あ   え 右
+       ↓ お
 ```
 
-現時点の辞書は実験用の内蔵辞書です。商用IME級の巨大辞書ではありません。
+`か` なら `か/き/く/け/こ`、`さ` なら `さ/し/す/せ/そ` のように各行へ展開します。
+
+12キー配置:
+
+```text
+あ      か      さ      ⌫
+た      な      は      ゛゜小
+ま      や      ら      ⏎
+英数    わ      、。    変換/空白
+```
+
+`゛゜小` は直前のかなを濁点・半濁点・小文字へ循環変換します。
+
+### 英数
+
+`英数` を押すとQWERTYへ切り替わります。日本語変換は行わず、英字をそのまま入力します。`かな` でフリックへ戻ります。
+
+## v0.4 通常かな漢字変換
+
+v0.3までの通常変換は、アプリ内に手書きした小さな辞書が中心だったため、特に人名・駅名・地名などの固有名詞に弱い状態でした。
+
+v0.4では **Mozc OSS dictionary** をビルド時に取得し、Android向けの読み→候補SQLiteへ再構成します。MozcはGoogle日本語入力を起源とするOSSの日本語IMEで、OSS辞書にはIPAdic系語彙や公開辞書由来の固有表現、Mozcの手動追加語が含まれます。
+
+例:
+
+```text
+うめだ
+  ↓
+梅田
+```
+
+CIでは `dictionary00.txt`〜`dictionary09.txt` と `dictionary_manual/places.tsv` / `words.tsv` を読み、同じ読みの候補をコスト順に圧縮して `mozc_compact.db` を作ります。入力時は変換対象に必要な部分文字列を1回のSQLiteクエリへまとめ、結果をLRUキャッシュします。
+
+このため、巨大な辞書全体をKotlinのHashMapへ展開せずに固有名詞を増やせます。
+
+なお、Mozc OSS辞書はGoogle日本語入力の商用辞書そのものではありません。Google日本語入力専用の大規模Web語彙はOSS版には含まれません。
 
 ## AI構成
 
@@ -47,8 +86,6 @@ Android向けの、完全オンデバイスTransformerを組み込んだ日本�
 
 ### Japanese Medium MoE Transformer
 
-v0.3ではv0.2の決定的benchmark weightsを廃止し、実際の日本語文で次文字予測学習した重みをAPKへ同梱します。
-
 - **5,022,784 parameters**
 - 4 Transformer layers
 - hidden size: 128
@@ -60,77 +97,69 @@ v0.3ではv0.2の決定的benchmark weightsを廃止し、実際の日本語文�
 - hash vocabulary buckets: 1024
 - symmetric INT8 quantization
 
-MoEなので全Expertはモデルパラメータとして保持しますが、各tokenではTop-1 Expertだけを実行します。v0.2より層数を8→4へ減らし、Expertsを8→16へ増やすことで、総パラメータを5M以上に維持しながら実推論量を抑えています。
-
-入力中はTiny Transformerで即座に候補を出し、約140ms入力が止まるとJapanese Medium MoEをバックグラウンドで実行します。
+入力中は通常辞書 + Tiny Transformerで即座に候補を出し、約140ms入力が止まるとJapanese Medium MoEをバックグラウンドで実行します。
 
 ```text
-良い感じだと思う  ✦JP5M 32ms
+梅田  ✦JP5M·D 7ms
 ```
 
-`✦JP5M` が表示された場合は、APK同梱の日本語コーパス学習済み重みで再ランキングが完了しています。学習済みassetが存在しないソースビルドではbenchmark fallbackへ切り替わり、表示は `✦5M` になります。
+`✦JP5M` は日本語コーパス学習済み5Mモデル、`·D` はMozc拡張辞書がロード済みであることを示します。
 
 ## 日本語コーパス学習
 
 学習スクリプトは `tools/train_medium_moe_japanese.py` です。
-
-学習データ:
 
 - Tatoeba Project 日本語 sentence weekly export
 - `jpn_sentences.tsv.bz2`
 - text license: Creative Commons Attribution 2.0 France (CC BY 2.0 FR)
 - attribution: Tatoeba Project contributors
 
-CIでは日本語文をreservoir samplingし、文字bucket化してcausal next-character predictionで学習します。生のコーパスはAPKへ格納せず、学習後に各tensorをsymmetric INT8へ量子化した `medium_moe_jpn.q8` のみAPKへ含めます。学習条件とSHA-256は `medium_moe_jpn.meta.json` に保存します。
+生コーパスはAPKへ格納せず、学習後にsymmetric INT8へ量子化した `medium_moe_jpn.q8` のみを含めます。
 
-Tatoeba download source:
+## Mozc辞書ビルド
 
-```text
-https://downloads.tatoeba.org/exports/per_language/jpn/jpn_sentences.tsv.bz2
+辞書ビルダー:
+
+```bash
+python tools/build_mozc_dictionary.py \
+  --output app/src/main/assets/mozc_compact.db \
+  --metadata app/src/main/assets/mozc_compact.meta.json \
+  --max-candidates 8
 ```
 
-Tatoeba Project contributorsに感謝します。
+元データは `google/mozc` のOSS辞書です。辞書由来データにはMozc本体とは別の第三者ライセンスが含まれるため、再配布時はMozcの `src/data/dictionary_oss/README.txt` に記載されたIPAdic / ICOT / Okinawa Dictionary等の条件を確認してください。
 
 ## UI / Safe Area
 
-一部のAndroid端末ではIMEウィンドウから `navigationBars()` が十分なbottom insetを返さず、言語切替・キーボードを閉じる領域と最下段キーが重なることがあります。
-
-v0.3では次を比較して最大値を採用します。
+v0.3以降、次のbottom insetを比較して最大値を採用し、さらに最低44dpの安全領域を確保します。
 
 - `WindowInsets.Type.navigationBars()`
 - `WindowInsets.Type.systemGestures()`
 - `WindowInsets.Type.mandatorySystemGestures()`
 - `WindowInsets.Type.tappableElement()`
-- 最低44dpのIME bottom safety zone
-
-これによりgesture navigation領域の報告値が0または小さい端末でも最下段を上へ逃がします。
 
 ## プライバシー
 
-IME本体はインターネット権限を要求しません。入力文脈と推論は端末内で処理します。パスワード入力欄ではTransformer候補を停止します。
+IME本体はインターネット権限を要求しません。入力文脈・辞書検索・Transformer推論は端末内で処理します。パスワード入力欄ではTransformer候補を停止します。
 
-日本語コーパスのダウンロードはモデルを作る**ビルド時のみ**です。実機上のIMEがTatoebaへアクセスすることはありません。
+TatoebaとMozcのダウンロードは**ビルド時のみ**です。インストール後のIMEが外部へ入力内容を送ることはありません。
 
-## ビルド
+## CI / ビルド
 
-通常のソースビルドは日本語モデルassetがなければbenchmark fallbackで動作します。
+GitHub Actionsは次を自動実行します。
 
-日本語学習済みAPKを作る場合は先に:
+1. Mozc OSS辞書を取得してcompact SQLiteを生成
+2. `うめだ → 梅田` を含むことを検証
+3. Tatoeba学習済み5Mモデルを生成またはcache復元
+4. Kotlin unit test
+5. APK build
 
-```bash
-python tools/train_medium_moe_japanese.py \
-  --output app/src/main/assets/medium_moe_jpn.q8 \
-  --metadata app/src/main/assets/medium_moe_jpn.meta.json
-```
-
-その後:
+ローカルでフル版APKを作る場合は辞書とモデルassetを生成してから:
 
 ```bash
 gradle :app:testDebugUnitTest
 gradle :app:assembleDebug
 ```
-
-GitHub Actionsは日本語モデルの学習・キャッシュ・loader実推論テスト・APK生成まで自動実行します。
 
 生成先:
 
@@ -140,16 +169,17 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## 次の実装候補
 
-- かな漢字辞書の大幅拡張
 - ユーザー辞書・個人頻度学習
-- INT4量子化
-- ONNX Runtime / ExecuTorch等との速度比較
-- フリック入力
 - 文節境界の手動変更
+- フリック入力の方向ガイド表示 / 長押し入力
+- 絵文字・記号パネル
+- INT4量子化
 - より長い日本語コーパス学習とvalidation perplexity計測
 
-## License
+## License / attribution
 
 Application prototype: License TBD.
 
-Corpus attribution: Tatoeba Project contributors, text distributed under CC BY 2.0 FR. See Tatoeba's Downloads / Terms of Use for details.
+Corpus attribution: Tatoeba Project contributors, text distributed under CC BY 2.0 FR.
+
+Dictionary source: Mozc OSS dictionary (`google/mozc`). Mozcの辞書データにはIPAdic等の第三者由来データが含まれます。詳細はMozc upstreamの `src/data/dictionary_oss/README.txt` を参照してください。

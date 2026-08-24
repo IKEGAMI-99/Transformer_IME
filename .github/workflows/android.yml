@@ -17,6 +17,43 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Restore compact Mozc dictionary
+        id: dictionary-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/src/main/assets/mozc_compact.db
+            app/src/main/assets/mozc_compact.meta.json
+          key: mozc-compact-v4-${{ hashFiles('tools/build_mozc_dictionary.py') }}
+
+      - name: Build compact Mozc dictionary
+        if: steps.dictionary-cache.outputs.cache-hit != 'true'
+        run: |
+          python tools/build_mozc_dictionary.py \
+            --output app/src/main/assets/mozc_compact.db \
+            --metadata app/src/main/assets/mozc_compact.meta.json \
+            --max-candidates 8
+
+      - name: Verify Mozc dictionary
+        run: |
+          python - <<'PY'
+          import json, sqlite3
+          from pathlib import Path
+          path = Path('app/src/main/assets/mozc_compact.db')
+          meta = Path('app/src/main/assets/mozc_compact.meta.json')
+          assert path.exists() and path.stat().st_size > 1_000_000
+          info = json.loads(meta.read_text(encoding='utf-8'))
+          assert int(info['unique_readings']) > 100_000, info
+          db = sqlite3.connect(path)
+          surfaces = [row[0] for row in db.execute(
+              "SELECT surface FROM entries WHERE reading=? ORDER BY cost", ('うめだ',)
+          )]
+          assert '梅田' in surfaces, surfaces
+          print('Mozc dictionary verified:', info['unique_readings'], 'readings,',
+                info['entry_count'], 'entries, うめだ ->', surfaces)
+          db.close()
+          PY
+
       - name: Restore trained Japanese model
         id: model-cache
         uses: actions/cache@v4
@@ -81,11 +118,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.3.0-debug
+          name: Transformer-IME-v0.4.0-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload model metadata
+      - name: Upload v0.4 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.3.0-model-metadata
-          path: app/src/main/assets/medium_moe_jpn.meta.json
+          name: Transformer-IME-v0.4.0-metadata
+          path: |
+            app/src/main/assets/medium_moe_jpn.meta.json
+            app/src/main/assets/mozc_compact.meta.json
