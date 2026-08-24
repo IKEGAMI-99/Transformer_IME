@@ -30,13 +30,13 @@ class MainActivity : Activity() {
             textSize = 30f
         })
         root.addView(TextView(this).apply {
-            text = "v0.4.0 · フリック入力 + Mozc辞書 + JP5M"
+            text = "v0.5.0 · Dark Flick UI + Mozc + Context JP5M"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 28.dp())
         })
 
         root.addView(TextView(this).apply {
-            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n日本語は12キーのフリック入力、英数モードはQWERTY入力です。入力内容は外部サーバーへ送信しません。パスワード欄ではAI候補を停止します。"
+            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n日本語は黒基調の12キーフリック、英数はQWERTYです。変換確定後は直前の文章を見て次候補を自動表示します。入力内容は外部サーバーへ送信しません。"
             textSize = 17f
             setLineSpacing(0f, 1.2f)
         })
@@ -58,7 +58,7 @@ class MainActivity : Activity() {
         })
 
         val aiSwitch = Switch(this).apply {
-            text = "Transformer候補ランキング"
+            text = "Transformer候補ランキング / 次候補予測"
             textSize = 17f
             gravity = Gravity.CENTER_VERTICAL
             isChecked = prefs.getBoolean("ai_enabled", true)
@@ -71,21 +71,21 @@ class MainActivity : Activity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "v0.4 入力・変換構成\n" +
-                "・日本語: 12キー5方向フリック + 濁点/半濁点/小文字キー\n" +
-                "・英語: QWERTY + Shift\n" +
-                "・通常変換: Mozc OSS辞書をCIで小型SQLiteへ変換し、地名・人名を含む候補をオンデバイス検索\n" +
-                "・Tiny Transformer: 即時候補と次語予測\n" +
-                "・Japanese Medium MoE: 5,022,784 parameters / ${MediumMoETransformer.LAYERS} layers / ${MediumMoETransformer.EXPERTS} experts / hidden ${MediumMoETransformer.DIM}\n" +
-                "・Tatoeba日本語文コーパスで次文字予測学習\n\n" +
-                "日本語学習済み5Mモデルが動作すると候補先頭に『✦JP5M』、拡張辞書もロード済みなら『·D』を付けます。"
+            text = "v0.5 構成\n" +
+                "・日本語: Gboard系の5列配置を参考にした黒基調12キーフリック\n" +
+                "・左列: Undo / カーソル左 / 記号 / 英数切替\n" +
+                "・右列: Backspace / カーソル右 / 変換 / Enter\n" +
+                "・通常変換: Mozc OSS由来SQLite辞書\n" +
+                "・確定直後: Tinyで次候補を即表示 → JP5Mが直前96文字の文脈で再ランキング\n" +
+                "・Japanese Medium MoE: 5,022,784 parameters / ${MediumMoETransformer.LAYERS} layers / ${MediumMoETransformer.EXPERTS} experts / hidden ${MediumMoETransformer.DIM}\n\n" +
+                "次候補のJP5M再ランキングが終わると『✦次JP5M xxms』と表示します。"
             textSize = 14f
             setPadding(0, 18.dp(), 0, 0)
             setLineSpacing(0f, 1.15f)
         })
 
         root.addView(TextView(this).apply {
-            text = "Tatoeba Project contributors · CC BY 2.0 FR。Mozc OSS dictionaryにはIPAdic等のOSS/公開データが含まれます。詳細な著作権表示はREADMEを参照してください。"
+            text = "UIは一般的な日本語12キー配列とダーク配色を参考にした独自実装です。Google/Gboardのロゴ・画像・専用アセットは使用していません。"
             textSize = 12f
             setPadding(0, 20.dp(), 0, 0)
         })
