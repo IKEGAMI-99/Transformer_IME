@@ -4,22 +4,16 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import java.io.File
 
-/**
- * Read-only compact dictionary generated from Mozc OSS data at CI build time.
- *
- * The APK contains only the compact SQLite database, not Mozc itself. Queries are batched for
- * all substrings needed by one conversion pass and cached so a flick keystroke normally causes
- * at most one small indexed SQLite query.
- */
+/** Read-only compact dictionary generated from Mozc OSS data at CI build time. */
 object MozcDictionary {
     data class Entry(val surface: String, val cost: Float)
+    data class PredictiveEntry(val reading: String, val surface: String, val cost: Float)
 
     private const val ASSET_NAME = "mozc_compact.db"
-    private const val LOCAL_NAME = "mozc_compact_v4.db"
+    private const val LOCAL_NAME = "mozc_compact_v6.db"
     private const val CACHE_LIMIT = 4096
 
-    @Volatile
-    private var database: SQLiteDatabase? = null
+    @Volatile private var database: SQLiteDatabase? = null
 
     @Volatile
     var isReady: Boolean = false
@@ -28,6 +22,11 @@ object MozcDictionary {
     private val cache = object : LinkedHashMap<String, List<Entry>>(512, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<Entry>>?): Boolean =
             size > CACHE_LIMIT
+    }
+
+    private val predictionCache = object : LinkedHashMap<String, List<PredictiveEntry>>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<PredictiveEntry>>?): Boolean =
+            size > 1024
     }
 
     fun initialize(context: Context) {
@@ -50,7 +49,7 @@ object MozcDictionary {
                     SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS
                 )
                 opened.rawQuery("SELECT value FROM metadata WHERE key='format_version'", null).use { cursor ->
-                    check(cursor.moveToFirst() && cursor.getString(0) == "1") { "Unsupported dictionary format" }
+                    check(cursor.moveToFirst() && cursor.getString(0) == "2") { "Unsupported dictionary format" }
                 }
                 database = opened
                 isReady = true
@@ -60,7 +59,7 @@ object MozcDictionary {
         }
     }
 
-    fun lookup(readings: Set<String>, maxCandidates: Int = 8): Map<String, List<Entry>> {
+    fun lookup(readings: Set<String>, maxCandidates: Int = 12): Map<String, List<Entry>> {
         val db = database ?: return emptyMap()
         if (readings.isEmpty()) return emptyMap()
 
@@ -74,7 +73,6 @@ object MozcDictionary {
         }
 
         if (missing.isNotEmpty()) {
-            // SQLite commonly supports at least 999 bound variables. Keep plenty of headroom.
             missing.chunked(400).forEach { chunk ->
                 val placeholders = chunk.joinToString(",") { "?" }
                 val queried = HashMap<String, MutableList<Entry>>()
@@ -86,13 +84,10 @@ object MozcDictionary {
                         val reading = cursor.getString(0)
                         val list = queried.getOrPut(reading) { ArrayList(maxCandidates) }
                         if (list.size < maxCandidates) {
-                            // Mozc word costs are positive and lower is better. Normalize them to a
-                            // range that works with CandidateGenerator's beam-search penalties.
                             list += Entry(cursor.getString(1), cursor.getInt(2).coerceAtLeast(0) / 10_000f)
                         }
                     }
                 }
-
                 synchronized(cache) {
                     chunk.forEach { reading ->
                         val values = queried[reading]?.toList().orEmpty()
@@ -103,5 +98,41 @@ object MozcDictionary {
             }
         }
         return result
+    }
+
+    /** Longer word/name suggestions for an unfinished reading such as 「うめ」 -> 「梅田」. */
+    fun predict(prefix: String, maxCandidates: Int = 8): List<PredictiveEntry> {
+        val db = database ?: return emptyList()
+        if (prefix.length < 2) return emptyList()
+        synchronized(predictionCache) {
+            predictionCache[prefix]?.let { return it.take(maxCandidates) }
+        }
+
+        // The asset stores only 2- and 3-kana indexes.  For longer input, use the first three
+        // kana as the compact lookup key, then filter by the complete live reading here.
+        val indexKey = prefix.take(if (prefix.length >= 3) 3 else 2)
+        val queried = ArrayList<PredictiveEntry>(16)
+        db.rawQuery(
+            "SELECT reading, surface, cost FROM predictions WHERE prefix=? ORDER BY cost LIMIT 16",
+            arrayOf(indexKey)
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val reading = cursor.getString(0)
+                if (!reading.startsWith(prefix)) continue
+                queried += PredictiveEntry(
+                    reading = reading,
+                    surface = cursor.getString(1),
+                    cost = cursor.getInt(2).coerceAtLeast(0) / 10_000f
+                )
+            }
+        }
+
+        val frozen = queried
+            .sortedWith(compareBy<PredictiveEntry> { it.cost }
+                .thenBy { it.reading.length - prefix.length }
+                .thenBy { it.surface.length })
+            .take(maxCandidates)
+        synchronized(predictionCache) { predictionCache[prefix] = frozen }
+        return frozen
     }
 }

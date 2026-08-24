@@ -1,8 +1,11 @@
 package com.ikegami.transformerime.conversion
 
 /**
- * Produces a compact candidate pool for post-commit prediction.
- * The Japanese corpus-trained MediumMoE model then reranks this pool from the live editor context.
+ * Produces the candidate pool for post-commit prediction.
+ *
+ * v0.6 first retrieves continuations that actually occurred after matching Japanese contexts in
+ * the Tatoeba-derived phrase DB, then mixes in high-confidence heuristics and Tiny predictions.
+ * The Japanese corpus-trained JP5M model performs the final reranking in TransformerImeService.
  */
 object NextCandidateGenerator {
     private val common = listOf(
@@ -13,9 +16,16 @@ object NextCandidateGenerator {
         "。", "、", "！", "？"
     )
 
-    fun candidates(context: String, tinyPredictions: List<String>, limit: Int = 24): List<String> {
+    fun candidates(context: String, tinyPredictions: List<String>, limit: Int = 28): List<String> {
         val recent = context.takeLast(96)
         val result = LinkedHashSet<String>()
+
+        // Real-corpus continuations are the strongest new source in v0.6.  They are already
+        // ranked by suffix specificity + corpus frequency; JP5M gets the final say afterward.
+        ContextPredictionStore.predict(recent, limit = 14)
+            .map { it.continuation }
+            .filter { it.isNotBlank() && it.length <= 20 }
+            .forEach(result::add)
 
         when {
             recent.endsWith("ありがとう") -> result.addAll(listOf("ございます", "！", "。", "助かります"))

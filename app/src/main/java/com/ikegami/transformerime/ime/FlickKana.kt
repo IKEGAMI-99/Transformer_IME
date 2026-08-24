@@ -27,8 +27,8 @@ object FlickKana {
         "な" to FlickSet("な", "に", "ぬ", "ね", "の"),
         "は" to FlickSet("は", "ひ", "ふ", "へ", "ほ"),
         "ま" to FlickSet("ま", "み", "む", "め", "も"),
-        // The spare up/down positions are useful Japanese punctuation on a 12-key layout.
-        "や" to FlickSet("や", "ゆ", "「", "よ", "」"),
+        // Gboard-like ya layout: up=ゆ, down=よ; brackets remain on left/right.
+        "や" to FlickSet("や", "「", "ゆ", "」", "よ"),
         "ら" to FlickSet("ら", "り", "る", "れ", "ろ"),
         "わ" to FlickSet("わ", "を", "ん", "ー", "〜"),
         "、。" to FlickSet("、", "。", "？", "！", "…")

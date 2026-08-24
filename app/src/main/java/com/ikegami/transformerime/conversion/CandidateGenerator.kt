@@ -3,13 +3,7 @@ package com.ikegami.transformerime.conversion
 import android.content.Context
 import kotlin.math.min
 
-/**
- * Kana -> surface conversion.
- *
- * v0.4 keeps a tiny high-priority fallback/technical dictionary, then augments it with the
- * compact Mozc OSS dictionary generated during CI. One batched lookup fetches every substring
- * the beam search can use, so names and places no longer depend on a hand-written list.
- */
+/** Kana -> surface conversion plus partial-reading prediction. */
 object CandidateGenerator {
     private data class Choice(val surface: String, val cost: Float)
     private data class State(val pos: Int, val text: String, val cost: Float, val convertedChars: Int)
@@ -17,8 +11,6 @@ object CandidateGenerator {
     private fun choices(vararg surfaces: String): List<Choice> =
         surfaces.mapIndexed { index, surface -> Choice(surface, index * 0.22f) }
 
-    // Deliberately small. General Japanese now comes from Mozc; these are fallback entries and
-    // project/domain-specific spellings we want to rank ahead of a generic dictionary.
     private val priorityDictionary: Map<String, List<Choice>> = mapOf(
         "きょう" to choices("今日", "きょう"),
         "きょうは" to choices("今日は", "きょうは"),
@@ -72,15 +64,21 @@ object CandidateGenerator {
         "あんどろいど" to choices("Android", "アンドロイド", "あんどろいど")
     )
 
-    private const val BEAM_WIDTH = 28
-    private const val MAX_WORD_LENGTH = 18
+    private const val BEAM_WIDTH = 36
+    private const val MAX_WORD_LENGTH = 20
 
-    fun initialize(context: Context) = MozcDictionary.initialize(context)
+    fun initialize(context: Context) {
+        MozcDictionary.initialize(context)
+        ContextPredictionStore.initialize(context)
+    }
 
     val extendedDictionaryReady: Boolean
         get() = MozcDictionary.isReady
 
-    fun candidates(reading: String, limit: Int = 12): List<String> {
+    val contextPredictionReady: Boolean
+        get() = ContextPredictionStore.isReady
+
+    fun candidates(reading: String, limit: Int = 16): List<String> {
         if (reading.isBlank()) return emptyList()
 
         val substringKeys = LinkedHashSet<String>()
@@ -88,23 +86,32 @@ object CandidateGenerator {
             val maxEnd = min(reading.length, pos + MAX_WORD_LENGTH)
             for (end in pos + 1..maxEnd) substringKeys += reading.substring(pos, end)
         }
-        val mozc = MozcDictionary.lookup(substringKeys, maxCandidates = 8)
+        val mozc = MozcDictionary.lookup(substringKeys, maxCandidates = 12)
 
         fun wordChoices(key: String): List<Choice> {
-            val result = ArrayList<Choice>(12)
+            val result = ArrayList<Choice>(16)
             priorityDictionary[key]?.let(result::addAll)
             val seen = result.mapTo(HashSet()) { it.surface }
             mozc[key].orEmpty().forEach { entry ->
                 if (seen.add(entry.surface)) {
-                    // Preserve Mozc ordering while fitting its word costs into our small beam-cost scale.
-                    result += Choice(entry.surface, (entry.cost * 0.45f).coerceIn(0.08f, 0.62f))
+                    result += Choice(entry.surface, (entry.cost * 0.45f).coerceIn(0.06f, 0.66f))
                 }
             }
             return result
         }
 
         val result = LinkedHashSet<String>()
+
+        // Exact conversion first.
         wordChoices(reading).forEach { result += it.surface }
+
+        // v0.6 predictive conversion: surface candidates whose full reading starts with the
+        // currently typed reading.  This is particularly useful for names and long compounds.
+        if (reading.length >= 2) {
+            MozcDictionary.predict(reading, maxCandidates = 8).forEach { prediction ->
+                result += prediction.surface
+            }
+        }
 
         val beams = Array(reading.length + 1) { mutableListOf<State>() }
         beams[0] += State(0, "", 0f, 0)
@@ -124,21 +131,21 @@ object CandidateGenerator {
                     if (choices.isEmpty()) continue
                     foundDictionaryWord = true
 
-                    choices.take(6).forEachIndexed { index, choice ->
+                    choices.take(8).forEachIndexed { index, choice ->
                         val converted = choice.surface != key
                         addState(
                             beams[end],
                             State(
                                 pos = end,
                                 text = state.text + choice.surface,
-                                cost = state.cost + choice.cost + 0.025f + index * 0.008f,
+                                cost = state.cost + choice.cost + 0.022f + index * 0.006f,
                                 convertedChars = state.convertedChars + if (converted) key.length else 0
                             )
                         )
                     }
                 }
 
-                val rawPenalty = if (foundDictionaryWord) 0.56f else 0.30f
+                val rawPenalty = if (foundDictionaryWord) 0.58f else 0.31f
                 addState(
                     beams[pos + 1],
                     State(
@@ -152,7 +159,7 @@ object CandidateGenerator {
         }
 
         beams[reading.length]
-            .sortedWith(compareBy<State> { it.cost - it.convertedChars * 0.020f }.thenBy { it.text.length })
+            .sortedWith(compareBy<State> { it.cost - it.convertedChars * 0.021f }.thenBy { it.text.length })
             .take(limit * 3)
             .forEach { result += it.text }
 

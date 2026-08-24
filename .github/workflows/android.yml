@@ -17,24 +17,24 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Restore compact Mozc dictionary
+      - name: Restore predictive Mozc dictionary
         id: dictionary-cache
         uses: actions/cache@v4
         with:
           path: |
             app/src/main/assets/mozc_compact.db
             app/src/main/assets/mozc_compact.meta.json
-          key: mozc-compact-v4-${{ hashFiles('tools/build_mozc_dictionary.py') }}
+          key: mozc-compact-v6-${{ hashFiles('tools/build_mozc_dictionary.py') }}
 
-      - name: Build compact Mozc dictionary
+      - name: Build predictive Mozc dictionary
         if: steps.dictionary-cache.outputs.cache-hit != 'true'
         run: |
           python tools/build_mozc_dictionary.py \
             --output app/src/main/assets/mozc_compact.db \
             --metadata app/src/main/assets/mozc_compact.meta.json \
-            --max-candidates 8
+            --max-candidates 12
 
-      - name: Verify Mozc dictionary
+      - name: Verify Mozc exact and prefix predictions
         run: |
           python - <<'PY'
           import json, sqlite3
@@ -43,14 +43,63 @@ jobs:
           meta = Path('app/src/main/assets/mozc_compact.meta.json')
           assert path.exists() and path.stat().st_size > 1_000_000
           info = json.loads(meta.read_text(encoding='utf-8'))
+          assert info['format_version'] == '2', info
           assert int(info['unique_readings']) > 100_000, info
+          assert int(info['prediction_entry_count']) > 10_000, info
           db = sqlite3.connect(path)
-          surfaces = [row[0] for row in db.execute(
+          exact = [r[0] for r in db.execute(
               "SELECT surface FROM entries WHERE reading=? ORDER BY cost", ('うめだ',)
           )]
-          assert '梅田' in surfaces, surfaces
-          print('Mozc dictionary verified:', info['unique_readings'], 'readings,',
-                info['entry_count'], 'entries, うめだ ->', surfaces)
+          predicted = [r[0] for r in db.execute(
+              "SELECT surface FROM predictions WHERE prefix=? ORDER BY cost", ('うめ',)
+          )]
+          assert '梅田' in exact, exact
+          assert '梅田' in predicted, predicted
+          print('Mozc verified: うめだ ->', exact[:6], '/ うめ ->', predicted[:8])
+          db.close()
+          PY
+
+      - name: Restore Japanese context predictions
+        id: context-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/src/main/assets/context_predictions.db
+            app/src/main/assets/context_predictions.meta.json
+          key: context-pred-v6-${{ hashFiles('tools/build_context_predictions.py') }}
+
+      - name: Install context tokenizer
+        if: steps.context-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install fugashi unidic-lite
+
+      - name: Build Japanese context predictions
+        if: steps.context-cache.outputs.cache-hit != 'true'
+        run: |
+          python tools/build_context_predictions.py \
+            --output app/src/main/assets/context_predictions.db \
+            --metadata app/src/main/assets/context_predictions.meta.json \
+            --max-sentences 60000 \
+            --max-candidates 10 \
+            --min-frequency 2
+
+      - name: Verify context prediction DB
+        run: |
+          python - <<'PY'
+          import json, sqlite3
+          from pathlib import Path
+          path = Path('app/src/main/assets/context_predictions.db')
+          info = json.loads(Path('app/src/main/assets/context_predictions.meta.json').read_text(encoding='utf-8'))
+          assert path.exists() and path.stat().st_size > 100_000, path.stat().st_size
+          assert int(info['unique_contexts']) > 1000, info
+          assert int(info['prediction_entries']) > 5000, info
+          db = sqlite3.connect(path)
+          examples = list(db.execute(
+              "SELECT context,continuation,freq FROM predictions ORDER BY freq DESC LIMIT 8"
+          ))
+          assert examples
+          print('Context DB verified:', info['unique_contexts'], 'contexts, examples=', examples)
           db.close()
           PY
 
@@ -118,13 +167,14 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.5.0-debug
+          name: Transformer-IME-v0.6.0-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.5 metadata
+      - name: Upload v0.6 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.5.0-metadata
+          name: Transformer-IME-v0.6.0-metadata
           path: |
             app/src/main/assets/medium_moe_jpn.meta.json
             app/src/main/assets/mozc_compact.meta.json
+            app/src/main/assets/context_predictions.meta.json
