@@ -114,10 +114,11 @@ jobs:
           assert path.read_bytes()[:4] == b'GGUF'
           assert path.stat().st_size > 65_000_000
           result = {
-              'version': '0.9.0',
-              'design': 'single Zenzai v3.2 with 10-way conversion / 12-way next prediction + local user learning',
+              'version': '0.9.1',
+              'design': 'single Zenzai v3.2; exactly 10-way conversion and 10-way next prediction; one visible AI candidate + raw reading second; local user learning',
               'estimated_total_parameters': 95_100_000,
               'quantization': 'Q5_K_M',
+              'inference_trials': 10,
               'model': {
                   'file': path.name,
                   'parameters': '95.1M',
@@ -160,13 +161,16 @@ jobs:
           test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
-      - name: Verify v0.9 architecture
+      - name: Verify v0.9.1 architecture
         run: |
-          grep -q 'CONVERSION_BRANCHES = 10' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
-          grep -q 'NEXT_BRANCHES = 12' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
+          grep -q 'INFERENCE_TRIALS = 10' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
+          grep -q 'generateCandidates(0, prompt, maxTokens, INFERENCE_TRIALS)' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
+          grep -q 'generateCandidates(0, prompt, NEXT_MAX_TOKENS, INFERENCE_TRIALS)' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
           grep -q 'std::clamp(branches, 1, 12)' app/src/main/cpp/zenz_jni.cpp
+          grep -q 'forceRawReadingSecond' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
+          grep -q '✦Z95×10' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
+          grep -q 'aiSlots = setOf(0)' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
           grep -q 'UserLearningStore' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
-          grep -q 'setOf(0, 2, 3)' app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
           test ! -f app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf
 
       - uses: actions/setup-java@v4
@@ -210,13 +214,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.9.0-Zenzai95M-Learning-debug
+          name: Transformer-IME-v0.9.1-Zenzai95M-x10-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.9 metadata
+      - name: Upload v0.9.1 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.9.0-metadata
+          name: Transformer-IME-v0.9.1-metadata
           path: |
             app/src/main/assets/zenzai95.meta.json
             app/src/main/assets/mozc_compact.meta.json
