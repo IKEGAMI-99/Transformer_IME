@@ -30,13 +30,13 @@ class MainActivity : Activity() {
             textSize = 30f
         })
         root.addView(TextView(this).apply {
-            text = "v0.5.0 · Dark Flick UI + Mozc + Context JP5M"
+            text = "v0.6.0 · Predictive Mozc + Corpus Context + JP5M"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 28.dp())
         })
 
         root.addView(TextView(this).apply {
-            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n日本語は黒基調の12キーフリック、英数はQWERTYです。変換確定後は直前の文章を見て次候補を自動表示します。入力内容は外部サーバーへ送信しません。"
+            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n日本語は黒基調の12キーフリック、英数はQWERTYです。v0.6では読み途中の変換予測と、実日本語コーパス由来の次候補を追加しました。入力内容は外部サーバーへ送信しません。"
             textSize = 17f
             setLineSpacing(0f, 1.2f)
         })
@@ -71,14 +71,14 @@ class MainActivity : Activity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "v0.5 構成\n" +
-                "・日本語: Gboard系の5列配置を参考にした黒基調12キーフリック\n" +
-                "・左列: Undo / カーソル左 / 記号 / 英数切替\n" +
-                "・右列: Backspace / カーソル右 / 変換 / Enter\n" +
-                "・通常変換: Mozc OSS由来SQLite辞書\n" +
-                "・確定直後: Tinyで次候補を即表示 → JP5Mが直前96文字の文脈で再ランキング\n" +
+            text = "v0.6 構成\n" +
+                "・日本語: 5列配置の黒基調12キーフリック\n" +
+                "・『や』: 上=ゆ / 下=よ / 左右=括弧\n" +
+                "・通常変換: Mozc OSS由来SQLite辞書 + 読み前方一致の変換予測\n" +
+                "・次候補: Tatoeba日本語文から作った文脈→続きDB + Tiny候補\n" +
+                "・最終順位: 日本語学習済みJP5Mが直前文脈で再ランキング\n" +
                 "・Japanese Medium MoE: 5,022,784 parameters / ${MediumMoETransformer.LAYERS} layers / ${MediumMoETransformer.EXPERTS} experts / hidden ${MediumMoETransformer.DIM}\n\n" +
-                "次候補のJP5M再ランキングが終わると『✦次JP5M xxms』と表示します。"
+                "候補生成を先に強化し、その候補をTransformerが選ぶハイブリッド構成です。"
             textSize = 14f
             setPadding(0, 18.dp(), 0, 0)
             setLineSpacing(0f, 1.15f)
