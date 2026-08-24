@@ -130,14 +130,8 @@ class TransformerImeService : InputMethodService() {
             candidateRow,
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 50.dp())
         )
-        candidateHost.addView(
-            scroll,
-            LinearLayout.LayoutParams(0, 50.dp(), 1f)
-        )
-        root.addView(
-            candidateHost,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 50.dp())
-        )
+        candidateHost.addView(scroll, LinearLayout.LayoutParams(0, 50.dp(), 1f))
+        root.addView(candidateHost, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 50.dp()))
 
         keyboardContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -145,10 +139,7 @@ class TransformerImeService : InputMethodService() {
         }
         root.addView(
             keyboardContainer,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         )
         renderKeyboard()
 
@@ -163,54 +154,20 @@ class TransformerImeService : InputMethodService() {
         if (japaneseMode) buildJapaneseFlickKeyboard(container) else buildEnglishQwertyKeyboard(container)
     }
 
-    /**
-     * Japanese 12-key layout follows the familiar Gboard-style geometry:
-     * function column / three kana columns / function column.
-     */
     private fun buildJapaneseFlickKeyboard(root: LinearLayout) {
-        addJapaneseRow(
-            root,
-            leftLabel = "↶",
-            kanaLabels = listOf("あ", "か", "さ"),
-            rightLabel = "⌫",
-            leftAction = ::handleUndo,
-            rightAction = ::handleBackspace
-        )
-        addJapaneseRow(
-            root,
-            leftLabel = "◀",
-            kanaLabels = listOf("た", "な", "は"),
-            rightLabel = "▶",
-            leftAction = { handleCursor(-1) },
-            rightAction = { handleCursor(1) }
-        )
-        addJapaneseRow(
-            root,
-            leftLabel = "☺記",
-            kanaLabels = listOf("ま", "や", "ら"),
-            rightLabel = "変換",
-            leftAction = ::showSymbolCandidates,
-            rightAction = ::handleConversionKey
-        )
+        addJapaneseRow(root, "↶", listOf("あ", "か", "さ"), "⌫", ::handleUndo, ::handleBackspace)
+        addJapaneseRow(root, "◀", listOf("た", "な", "は"), "▶", { handleCursor(-1) }, { handleCursor(1) })
+        addJapaneseRow(root, "☺記", listOf("ま", "や", "ら"), "変換", ::showSymbolCandidates, ::handleConversionKey)
 
         val bottom = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(BLACK)
         }
-        bottom.addView(
-            functionButton("あa1", pill = true) { toggleMode(false) },
-            japaneseSideParams()
-        )
-        bottom.addView(
-            functionButton("゛゜\n大小") { handleKanaModifier() },
-            japaneseCenterParams()
-        )
+        bottom.addView(functionButton("あa1", pill = true) { toggleMode(false) }, japaneseSideParams())
+        bottom.addView(functionButton("゛゜\n大小") { handleKanaModifier() }, japaneseCenterParams())
         bottom.addView(flickButton("わ"), japaneseCenterParams())
         bottom.addView(flickButton("、。"), japaneseCenterParams())
-        bottom.addView(
-            functionButton("↵", accent = true) { handleEnter() },
-            japaneseSideParams()
-        )
+        bottom.addView(functionButton("↵", accent = true) { handleEnter() }, japaneseSideParams())
         root.addView(bottom, japaneseRowParams())
     }
 
@@ -329,11 +286,8 @@ class TransformerImeService : InputMethodService() {
     }
 
     private fun handleFlickOutput(output: String) {
-        if (output in setOf("、", "。", "？", "！", "…", "「", "」", "〜")) {
-            handlePunctuation(output)
-        } else {
-            handleKana(output)
-        }
+        if (output in setOf("、", "。", "？", "！", "…", "「", "」", "〜")) handlePunctuation(output)
+        else handleKana(output)
     }
 
     private fun handleKana(kana: String) {
@@ -382,9 +336,8 @@ class TransformerImeService : InputMethodService() {
 
     private fun handleConversionKey() {
         cancelPendingNextPrediction()
-        if (compositionBuffer.isNotEmpty()) {
-            commitCandidate(currentCandidates.firstOrNull() ?: currentReading)
-        } else {
+        if (compositionBuffer.isNotEmpty()) commitCandidate(currentCandidates.firstOrNull() ?: currentReading)
+        else {
             currentInputConnection?.commitText(" ", 1)
             postNextPredictions()
         }
@@ -420,9 +373,7 @@ class TransformerImeService : InputMethodService() {
             setPadding(horizontalPadding.dp(), 0, horizontalPadding.dp(), 0)
             setBackgroundColor(BLACK)
         }
-        letters.forEach { letter ->
-            row.addView(qwertyButton(displayEnglishLetter(letter), 1f) { handleEnglishLetter(letter) })
-        }
+        letters.forEach { letter -> row.addView(qwertyButton(displayEnglishLetter(letter), 1f) { handleEnglishLetter(letter) }) }
         root.addView(row, qwertyRowParams())
     }
 
@@ -478,27 +429,10 @@ class TransformerImeService : InputMethodService() {
         showCandidates(emptyList(), null) { }
     }
 
-    private fun japaneseRowParams() = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        60.dp()
-    )
-
-    private fun japaneseSideParams() = LinearLayout.LayoutParams(
-        0,
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        0.82f
-    )
-
-    private fun japaneseCenterParams() = LinearLayout.LayoutParams(
-        0,
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        1.18f
-    )
-
-    private fun qwertyRowParams() = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        55.dp()
-    )
+    private fun japaneseRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 60.dp())
+    private fun japaneseSideParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.82f)
+    private fun japaneseCenterParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.18f)
+    private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 55.dp())
 
     private fun refreshCompositionAndCandidates() {
         val reading = compositionBuffer.toString()
@@ -529,14 +463,11 @@ class TransformerImeService : InputMethodService() {
         val runnable = Runnable {
             if (epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@Runnable
             inferenceExecutor.execute {
-                val result = runCatching {
-                    medium.rerank(contextSnapshot, reading, candidatesSnapshot)
-                }.getOrNull() ?: return@execute
-
+                val result = runCatching { medium.rerank(contextSnapshot, reading, candidatesSnapshot) }.getOrNull() ?: return@execute
                 mainHandler.post {
                     if (epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@post
                     currentCandidates = result.candidates
-                    val modelTag = if (medium.corpusTrained) "✦JP5M" else "✦5M"
+                    val modelTag = if (medium.corpusTrained) "✦JP21M" else "✦21M"
                     val dictionaryTag = if (CandidateGenerator.extendedDictionaryReady) "·D" else ""
                     showCandidates(result.candidates, "$modelTag$dictionaryTag ${result.latencyMs}ms") { commitCandidate(it) }
                 }
@@ -570,9 +501,7 @@ class TransformerImeService : InputMethodService() {
                 currentInputConnection?.finishComposingText()
                 compositionContext = ""
                 postNextPredictions()
-            } else {
-                refreshCompositionAndCandidates()
-            }
+            } else refreshCompositionAndCandidates()
             return
         }
         currentInputConnection?.deleteSurroundingText(1, 0)
@@ -631,11 +560,6 @@ class TransformerImeService : InputMethodService() {
         if (japaneseMode) postNextPredictions() else showCandidates(emptyList(), null) { }
     }
 
-    /**
-     * v0.5 post-commit prediction:
-     * 1) Tiny model + context heuristics provide an immediate candidate pool.
-     * 2) Corpus-trained JP5M reranks that pool from the actual text before the cursor.
-     */
     private fun postNextPredictions() {
         cancelPendingNextPrediction(incrementEpoch = false)
         if (!aiActive() || !japaneseMode || compositionBuffer.isNotEmpty()) {
@@ -665,7 +589,7 @@ class TransformerImeService : InputMethodService() {
         val medium = mediumModel ?: return
         if (!aiActive() || candidates.size <= 1) return
         val epoch = ++predictionEpoch
-        val contextTail = context.takeLast(96)
+        val contextTail = context.takeLast(160)
         val pool = candidates.toList()
 
         val runnable = Runnable {
@@ -674,9 +598,9 @@ class TransformerImeService : InputMethodService() {
                 val result = runCatching { medium.rerank(contextTail, "", pool) }.getOrNull() ?: return@execute
                 mainHandler.post {
                     if (epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@post
-                    if (textBeforeCursor().takeLast(96) != contextTail) return@post
+                    if (textBeforeCursor().takeLast(160) != contextTail) return@post
                     currentCandidates = result.candidates
-                    val modelTag = if (medium.corpusTrained) "✦次JP5M" else "✦次5M"
+                    val modelTag = if (medium.corpusTrained) "✦次JP21M" else "✦次21M"
                     showCandidates(result.candidates.take(8), "$modelTag ${result.latencyMs}ms") { commitPrediction(it) }
                 }
             }
@@ -691,11 +615,7 @@ class TransformerImeService : InputMethodService() {
         postNextPredictions()
     }
 
-    private fun showCandidates(
-        candidates: List<String>,
-        aiBadge: String?,
-        onClick: (String) -> Unit
-    ) {
+    private fun showCandidates(candidates: List<String>, aiBadge: String?, onClick: (String) -> Unit) {
         val row = candidateRow ?: return
         row.removeAllViews()
         candidates.forEachIndexed { index, candidate ->
@@ -711,14 +631,16 @@ class TransformerImeService : InputMethodService() {
             }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, 42.dp()))
 
             if (index != candidates.lastIndex) {
-                row.addView(View(this).apply { setBackgroundColor(Color.rgb(82, 82, 82)) },
-                    LinearLayout.LayoutParams(1.dp(), 24.dp()).apply { gravity = Gravity.CENTER_VERTICAL })
+                row.addView(
+                    View(this).apply { setBackgroundColor(Color.rgb(82, 82, 82)) },
+                    LinearLayout.LayoutParams(1.dp(), 24.dp()).apply { gravity = Gravity.CENTER_VERTICAL }
+                )
             }
         }
     }
 
     private fun textBeforeCursor(): String = currentInputConnection
-        ?.getTextBeforeCursor(160, 0)
+        ?.getTextBeforeCursor(200, 0)
         ?.toString()
         .orEmpty()
 
