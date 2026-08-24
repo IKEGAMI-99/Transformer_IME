@@ -41,7 +41,7 @@ class MainActivity : Activity() {
             textSize = 30f
         })
         root.addView(TextView(this).apply {
-            text = "v0.10.1 · Zenzai 95M ×10 + Personal RAG + Reactive Audio Pulse"
+            text = "v0.10.2 · Zenzai 95M ×10 + Personal RAG + Bottom Glow Audio Pulse"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 22.dp())
         })
@@ -84,7 +84,7 @@ class MainActivity : Activity() {
         root.addView(audioSwitch, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 64.dp()))
 
         root.addView(TextView(this).apply {
-            text = "Audio Pulseはキャプチャ可能なシステム再生音のRMSと瞬間ピークだけを解析します。色はキー領域の背景だけに表示され、小音量は青〜シアン、中音量は紫、高音量はピンク〜オレンジへ変化し、立ち上がりに合わせて鼓動します。初回はAndroidの音声/画面キャプチャ許可が必要です。"
+            text = "Audio Pulseはキャプチャ可能なシステム再生音のRMSと瞬間ピークだけを解析します。無音時は黒。音が入るとキー領域の下端からグラデーションが立ち上がり、小音量は青〜シアン、中音量は紫、高音量はピンク〜オレンジへ変化します。初回はAndroidの音声/画面キャプチャ許可が必要です。"
             textSize = 13f
             setPadding(0, 0, 0, 16.dp())
         })
@@ -107,13 +107,14 @@ class MainActivity : Activity() {
         }, fullButton(8))
 
         root.addView(TextView(this).apply {
-            text = "v0.10.1 構成\n" +
+            text = "v0.10.2 構成\n" +
                 "・Zenzai v3.2-small Q5_K_M 約95.1M / 10試行\n" +
                 "・Mozc OSS辞書 + 読み途中予測\n" +
                 "・個人RAG: 過去に選んだ変換と文脈続きを候補プールへ再投入\n" +
                 "・英語QWERTY: 補完・スペル候補・次単語 + 個人学習\n" +
-                "・123: 扇状ポップアップを廃止し4×4数字キーパッドへ切替\n" +
-                "・Audio Pulse: キー領域限定 / 音量連動カラー + beat envelope\n" +
+                "・123: 4×4数字キーパッドへ切替\n" +
+                "・Audio Pulse: 最大320dp / 無音黒 / 下端光源 / 音量連動カラー\n" +
+                "・キー面: 通常時はほぼ透明、背景グローを直接表示\n" +
                 "・パスワード欄: AI・学習とも停止"
             textSize = 14f
             setPadding(0, 20.dp(), 0, 0)
