@@ -277,7 +277,10 @@ class TransformerImeService : InputMethodService() {
             val reportedBottom = insets.getInsets(typeMask).bottom
             val safeBottom = maxOf(minimumBottomSafe, reportedBottom + 6.dp())
                 .coerceAtMost(maximumBottomSafe)
-            keyboardContainer?.setPadding(0, 0, 0, safeBottom)
+            val container = keyboardContainer
+            if (container != null && container.paddingBottom != safeBottom) {
+                container.setPadding(0, 0, 0, safeBottom)
+            }
             insets
         }
 
@@ -314,6 +317,7 @@ class TransformerImeService : InputMethodService() {
         val container = keyboardContainer ?: return
         container.removeAllViews()
         if (japaneseMode) buildJapaneseFlickKeyboard(container) else buildEnglishQwertyKeyboard(container)
+        container.requestLayout()
     }
 
     // ------------------------------------------------------------
@@ -785,7 +789,7 @@ class TransformerImeService : InputMethodService() {
         val personalized = if (!secureField) runCatching { learningStore?.rankConversions(reading, base) ?: base }.getOrDefault(base) else base
         val tinyRanked = if (aiActive()) runCatching { model?.rankCandidates(compositionContext, personalized) ?: personalized }.getOrDefault(personalized) else personalized
         val stableRanked = if (tinyRanked.isEmpty()) listOf(reading) else tinyRanked
-        val visible = if (aiActive()) forceRawReadingSecond(stableRanked.first(), reading, stableRanked.drop(1)) else stableRanked
+        val visible = if (aiActive()) forceKatakanaSecond(stableRanked.first(), reading, stableRanked.drop(1)) else stableRanked
         currentCandidates = visible
         showCandidates(
             visible,
@@ -809,15 +813,15 @@ class TransformerImeService : InputMethodService() {
                 // before spending another 10-way inference on text the user already changed.
                 if (!serviceAlive || !inputViewActive || epoch != candidateEpoch || currentReading != reading || compositionBuffer.toString() != reading) return@submitInference
                 val result = runCatching { medium.rerank(contextSnapshot, reading, snapshot) }.getOrNull() ?: return@submitInference
-                val rawSecond = if (result.candidates.isNotEmpty()) {
-                    forceRawReadingSecond(result.candidates.first(), reading, result.candidates.drop(1))
-                } else listOf(reading)
+                val katakanaSecond = if (result.candidates.isNotEmpty()) {
+                    forceKatakanaSecond(result.candidates.first(), reading, result.candidates.drop(1))
+                } else listOf(toKatakanaReading(reading), reading).filter { it.isNotBlank() }.distinct()
                 mainHandler.post {
                     if (!serviceAlive || !inputViewActive || epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@post
-                    currentCandidates = rawSecond
+                    currentCandidates = katakanaSecond
                     val dictionaryTag = if (CandidateGenerator.extendedDictionaryReady) "·D" else ""
                     val ragTag = if (ragUsed) "·R" else ""
-                    showCandidates(rawSecond, "✦Z95×10$dictionaryTag$ragTag ${result.latencyMs}ms", aiSlots = setOf(0)) { commitCandidate(it) }
+                    showCandidates(katakanaSecond, "✦Z95×10$dictionaryTag$ragTag ${result.latencyMs}ms", aiSlots = setOf(0)) { commitCandidate(it) }
                 }
             }
         }
@@ -825,9 +829,15 @@ class TransformerImeService : InputMethodService() {
         mainHandler.postDelayed(runnable, 90L)
     }
 
-    private fun forceRawReadingSecond(aiCandidate: String, reading: String, rest: List<String>): List<String> = buildList {
-        add(aiCandidate); add(reading)
-        rest.forEach { if (it != aiCandidate && it != reading) add(it) }
+    private fun toKatakanaReading(reading: String): String = reading.map { ch ->
+        if (ch in 'ぁ'..'ゖ') (ch.code + 0x60).toChar() else ch
+    }.joinToString("")
+
+    private fun forceKatakanaSecond(aiCandidate: String, reading: String, rest: List<String>): List<String> = buildList {
+        val katakana = toKatakanaReading(reading)
+        add(aiCandidate)
+        if (katakana.isNotBlank() && katakana != aiCandidate) add(katakana)
+        rest.forEach { if (it != aiCandidate && it != katakana) add(it) }
     }.filter { it.isNotBlank() }.distinct()
 
     private fun postNextPredictions() {
@@ -995,7 +1005,9 @@ class TransformerImeService : InputMethodService() {
         if (compositionBuffer.isNotEmpty()) commitRawReading()
         if (englishBuffer.isNotEmpty()) commitEnglishBuffer(false)
         japaneseMode = toJapanese; englishShift = false; renderKeyboard()
-        inputRoot?.requestApplyInsets()
+        // Insets belong to the IME window, not the keyboard layout. Re-requesting them on every
+        // mode switch caused HyperOS to deliver a delayed second layout pass after the first key.
+        keyboardContainer?.requestLayout()
         if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
     }
 
@@ -1095,7 +1107,7 @@ class TransformerImeService : InputMethodService() {
     private fun japaneseRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 60.dp())
     private fun japaneseSideParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.82f)
     private fun japaneseCenterParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.18f)
-    private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 55.dp())
+    private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 60.dp())
 
     /** Continuous bottom-up Audio Pulse background. */
     private class AudioPulseBackgroundView(context: Context) : View(context) {
