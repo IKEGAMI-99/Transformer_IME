@@ -30,13 +30,13 @@ class MainActivity : Activity() {
             textSize = 30f
         })
         root.addView(TextView(this).apply {
-            text = "v0.6.0 · Predictive Mozc + Corpus Context + JP5M"
+            text = "v0.7.0 · Predictive Mozc + Corpus Context + JP21M"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 28.dp())
         })
 
         root.addView(TextView(this).apply {
-            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n日本語は黒基調の12キーフリック、英数はQWERTYです。v0.6では読み途中の変換予測と、実日本語コーパス由来の次候補を追加しました。入力内容は外部サーバーへ送信しません。"
+            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n日本語は黒基調の12キーフリック、英数はQWERTYです。v0.7では小文字入力を優先する修飾キーと、約2,115万parameterの日本語Transformerを搭載しました。入力内容は外部サーバーへ送信しません。"
             textSize = 17f
             setLineSpacing(0f, 1.2f)
         })
@@ -62,23 +62,21 @@ class MainActivity : Activity() {
             textSize = 17f
             gravity = Gravity.CENTER_VERTICAL
             isChecked = prefs.getBoolean("ai_enabled", true)
-            setOnCheckedChangeListener { _, checked ->
-                prefs.edit().putBoolean("ai_enabled", checked).apply()
-            }
+            setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("ai_enabled", checked).apply() }
         }
         root.addView(aiSwitch, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 64.dp()).apply {
             topMargin = 24.dp()
         })
 
         root.addView(TextView(this).apply {
-            text = "v0.6 構成\n" +
-                "・日本語: 5列配置の黒基調12キーフリック\n" +
-                "・『や』: 上=ゆ / 下=よ / 左右=括弧\n" +
-                "・通常変換: Mozc OSS由来SQLite辞書 + 読み前方一致の変換予測\n" +
-                "・次候補: Tatoeba日本語文から作った文脈→続きDB + Tiny候補\n" +
-                "・最終順位: 日本語学習済みJP5Mが直前文脈で再ランキング\n" +
-                "・Japanese Medium MoE: 5,022,784 parameters / ${MediumMoETransformer.LAYERS} layers / ${MediumMoETransformer.EXPERTS} experts / hidden ${MediumMoETransformer.DIM}\n\n" +
-                "候補生成を先に強化し、その候補をTransformerが選ぶハイブリッド構成です。"
+            text = "v0.7 構成\n" +
+                "・小文字優先: つ→っ→づ、う→ぅ→ゔ\n" +
+                "・通常変換: Mozc OSS由来SQLite辞書 + 読み前方一致予測\n" +
+                "・次候補: Tatoeba日本語文由来の文脈DB + Tiny候補\n" +
+                "・最終順位: 日本語学習済みJP21Mで再ランキング\n" +
+                "・Japanese MoE: 約21.15M parameters / ${MediumMoETransformer.LAYERS} layers / ${MediumMoETransformer.EXPERTS} experts / hidden ${MediumMoETransformer.DIM}\n" +
+                "・語彙hash 4096 / context ${MediumMoETransformer.CONTEXT_LENGTH}\n\n" +
+                "Top-1 MoEなので総parameter数より実計算量を抑えています。"
             textSize = 14f
             setPadding(0, 18.dp(), 0, 0)
             setLineSpacing(0f, 1.15f)
