@@ -5,3 +5,6 @@ local.properties
 /build/
 app/build/
 .DS_Store
+.cache/
+app/src/main/assets/medium_moe_jpn.q8
+app/src/main/assets/medium_moe_jpn.meta.json

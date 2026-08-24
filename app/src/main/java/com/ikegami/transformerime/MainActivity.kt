@@ -30,7 +30,7 @@ class MainActivity : Activity() {
             textSize = 30f
         })
         root.addView(TextView(this).apply {
-            text = "v0.2.0 · 文節変換 + 5M MoE Transformer"
+            text = "v0.3.0 · 日本語Corpus-trained 5M MoE"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 28.dp())
         })
@@ -70,19 +70,20 @@ class MainActivity : Activity() {
             topMargin = 24.dp()
         })
 
-        val paramsApprox = 5_025_000
         root.addView(TextView(this).apply {
-            text = "v0.2 AI構成\n" +
-                "・Tiny Transformer: 学習済みPoC。次語予測と意味側の初期ランキング\n" +
-                "・Medium MoE: 約${paramsApprox / 1_000_000.0}M parameters / ${MediumMoETransformer.LAYERS} layers / ${MediumMoETransformer.EXPERTS} experts / hidden ${MediumMoETransformer.DIM}\n\n" +
-                "入力中はTinyで即座に候補を出し、約140ms入力が止まると5M MoEが候補を再ランキングします。5M推論が完了すると候補先頭に『✦5M xxms』を表示します。"
+            text = "v0.3 AI構成\n" +
+                "・Tiny Transformer: 即時候補と次語予測\n" +
+                "・Japanese Medium MoE: 5,022,784 parameters / ${MediumMoETransformer.LAYERS} layers / ${MediumMoETransformer.EXPERTS} experts / hidden ${MediumMoETransformer.DIM}\n" +
+                "・Tatoeba日本語文コーパスで次文字予測学習\n" +
+                "・INT8重みを端末内で復号し、Top-1 expertのみ実行\n\n" +
+                "約140ms入力が止まると日本語学習済み5Mモデルが再ランキングします。学習済みモデルが動作した場合は候補先頭に『✦JP5M xxms』を表示します。"
             textSize = 14f
             setPadding(0, 18.dp(), 0, 0)
             setLineSpacing(0f, 1.15f)
         })
 
         root.addView(TextView(this).apply {
-            text = "※ v0.2の5M MoEは実機の速度・メモリ・IME統合を検証するための実験バックボーンです。日本語コーパスで全面学習した完成モデルではなく、学習済みTinyモデルとのハイブリッドで候補順位を安定させています。"
+            text = "Tatoeba Project contributors · CC BY 2.0 FR。生コーパスはAPKに含めず、学習後の量子化モデルのみ同梱します。"
             textSize = 12f
             setPadding(0, 20.dp(), 0, 0)
         })

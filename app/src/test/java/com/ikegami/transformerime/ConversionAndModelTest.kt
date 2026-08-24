@@ -2,6 +2,8 @@ package com.ikegami.transformerime
 
 import com.ikegami.transformerime.conversion.CandidateGenerator
 import com.ikegami.transformerime.model.MediumMoETransformer
+import java.io.File
+import java.io.FileInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -30,6 +32,28 @@ class ConversionAndModelTest {
         assertEquals(source.toSet(), result.candidates.toSet())
         assertEquals(source.size, result.candidates.size)
         assertTrue(result.latencyMs >= 0)
-        println("MediumMoE params=${model.parameterCount}, JVM latency=${result.latencyMs}ms, ranked=${result.candidates}")
+    }
+
+    @Test
+    fun exportedJapaneseCorpusModelLoadsAndRuns() {
+        val modelFile = listOf(
+            File("app/src/main/assets/medium_moe_jpn.q8"),
+            File("src/main/assets/medium_moe_jpn.q8")
+        ).firstOrNull { it.exists() }
+            ?: error("Generated Japanese model asset was not found")
+
+        val model = FileInputStream(modelFile).use { MediumMoETransformer.loadQuantized(it) }
+        assertTrue(model.corpusTrained)
+        assertTrue(model.sourceLabel.contains("Tatoeba"))
+        assertTrue("parameter count=${model.parameterCount}", model.parameterCount >= 5_000_000)
+
+        val source = listOf("良い感じだと思う", "いい感じだと思う", "良い感じだとおもう")
+        val result = model.rerank(
+            contextText = "これは",
+            reading = "いいかんじだとおもう",
+            candidates = source
+        )
+        assertEquals(source.toSet(), result.candidates.toSet())
+        assertTrue(result.latencyMs >= 0)
     }
 }
