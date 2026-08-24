@@ -2,7 +2,7 @@ package com.ikegami.transformerime.model
 
 import android.content.Context
 
-/** Compatibility adapter around the v0.9 single-model Zenzai runtime. */
+/** Compatibility adapter around the single process-wide Zenzai runtime. */
 class MediumMoETransformer private constructor(
     private val engine: Zenzai190MEngine?,
     val corpusTrained: Boolean,
@@ -18,25 +18,31 @@ class MediumMoETransformer private constructor(
     var lastInferenceMs: Long = 0
         private set
 
+    /**
+     * The native model is shared process-wide, while Android may briefly overlap old and new
+     * InputMethodService instances during recreation. Serialize every llama.cpp call here so two
+     * service-local executors can never enter the same native context concurrently.
+     */
     fun rerank(contextText: String, reading: String, candidates: List<String>): RankResult {
         if (candidates.isEmpty()) return RankResult(candidates, 0)
         val active = engine ?: return RankResult(candidates, 0)
-        return if (reading.isNotEmpty()) {
-            val result = active.rerankConversion(contextText, reading, candidates)
-            lastInferenceMs = result.latencyMs
-            RankResult(result.candidates, result.latencyMs)
-        } else {
-            val result = active.predictNext(contextText, candidates)
-            lastInferenceMs = result.latencyMs
-            RankResult(result.candidates, result.latencyMs)
+        return synchronized(nativeInferenceLock) {
+            if (reading.isNotEmpty()) {
+                val result = active.rerankConversion(contextText, reading, candidates)
+                lastInferenceMs = result.latencyMs
+                RankResult(result.candidates, result.latencyMs)
+            } else {
+                val result = active.predictNext(contextText, candidates)
+                lastInferenceMs = result.latencyMs
+                RankResult(result.candidates, result.latencyMs)
+            }
         }
     }
 
     /**
-     * The active Zenzai instance is process-scoped. InputMethodService instances can be
-     * recreated while a native inference is still unwinding, so closing the model from an
-     * individual service lifecycle can race llama.cpp and crash the process. The Android
-     * process owns the shared engine and the OS reclaims it when the process exits.
+     * The active Zenzai instance is process-scoped. An InputMethodService must not free it because
+     * another service instance or an already-running native call may still own it. Android reclaims
+     * the process and native memory together.
      */
     fun close() = Unit
 
@@ -51,10 +57,13 @@ class MediumMoETransformer private constructor(
         private const val EXPECTED_TOTAL = 80_000_000L
 
         @Volatile private var sharedInstance: MediumMoETransformer? = null
+        private val nativeInferenceLock = Any()
 
         @Synchronized
         fun load(context: Context): MediumMoETransformer {
-            sharedInstance?.let { return it }
+            // A healthy native instance is permanent for the process. A fallback instance is not:
+            // initialization may have failed transiently while assets were being materialized.
+            sharedInstance?.takeIf { it.corpusTrained }?.let { return it }
 
             val engine = Zenzai190MEngine(context.applicationContext)
             val ready = runCatching { engine.initialize() }.getOrDefault(false)

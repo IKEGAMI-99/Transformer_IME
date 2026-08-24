@@ -45,15 +45,21 @@ class TransformerImeService : InputMethodService() {
     private val englishBuffer = StringBuilder()
     private var compositionContext = ""
     private var englishContext = ""
+
+    // InputMethodService may reuse the exact same InputView after onFinishInputView(). These
+    // references therefore live for the service lifetime and are released only in onDestroy().
+    private var inputRoot: FrameLayout? = null
     private var candidateRow: LinearLayout? = null
     private var keyboardContainer: LinearLayout? = null
     private var pulseBackground: AudioPulseBackgroundView? = null
     private var commentOverlay: FrameLayout? = null
+    private var inputViewActive = false
+
     private var japaneseMode = true
     private var englishShift = false
     private var secureField = false
     private var aiEnabledByUser = true
-    private var model: TinyTransformerModel? = null
+    @Volatile private var model: TinyTransformerModel? = null
     private var learningStore: UserLearningStore? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -71,11 +77,13 @@ class TransformerImeService : InputMethodService() {
 
     private val pulseRunnable = object : Runnable {
         override fun run() {
-            if (!serviceAlive) return
+            if (!serviceAlive || !inputViewActive) return
+            val background = pulseBackground ?: return
+            if (!background.isAttachedToWindow) return
             val enabled = AudioPulseState.active
             val level = if (enabled) AudioPulseState.level else 0f
-            pulseBackground?.setPulse(level, enabled)
-            if (pulseBackground != null) mainHandler.postDelayed(this, 40L)
+            background.setPulse(level, enabled)
+            mainHandler.postDelayed(this, 40L)
         }
     }
 
@@ -84,29 +92,45 @@ class TransformerImeService : InputMethodService() {
     override fun onCreate() {
         super.onCreate()
         serviceAlive = true
-        model = ModelRepository.get(this)
         learningStore = UserLearningStore(this)
+
+        // Asset decoding, dictionary installation and GGUF materialization do not belong on the
+        // IME main thread. The keyboard stays usable with raw/built-in candidates while startup
+        // finishes, then the currently visible composition is refreshed automatically.
         submitInference {
-            CandidateGenerator.initialize(this)
-            mediumModel = runCatching { MediumMoETransformer.load(applicationContext) }.getOrNull()
+            val app = applicationContext
+            model = runCatching { ModelRepository.get(app) }.getOrNull()
+            runCatching { CandidateGenerator.initialize(app) }
+            mediumModel = runCatching { MediumMoETransformer.load(app) }.getOrNull()
+            mainHandler.post {
+                if (!serviceAlive || !inputViewActive) return@post
+                if (japaneseMode) {
+                    if (compositionBuffer.isNotEmpty()) refreshCompositionAndCandidates() else postNextPredictions()
+                } else {
+                    if (englishBuffer.isNotEmpty()) showEnglishSuggestions() else postEnglishNextPredictions()
+                }
+            }
         }
     }
 
     override fun onDestroy() {
         serviceAlive = false
+        inputViewActive = false
         cancelPendingRerank()
         cancelPendingNextPrediction()
         stopDeleteRepeat()
         mainHandler.removeCallbacks(pulseRunnable)
         clearCommentOverlay()
+        inputRoot = null
         pulseBackground = null
+        commentOverlay = null
         keyboardContainer = null
         candidateRow = null
         mediumModel = null
         runCatching { learningStore?.close() }
         learningStore = null
-        // Let an already-running llama.cpp call unwind naturally. Interrupting it while an
-        // InputMethodService is being torn down was a likely source of native instability.
+        // Do not interrupt an active llama.cpp call. MediumMoETransformer serializes the shared
+        // native engine process-wide, and the executor is allowed to unwind naturally.
         inferenceExecutor.shutdown()
         super.onDestroy()
     }
@@ -126,6 +150,12 @@ class TransformerImeService : InputMethodService() {
             .getBoolean("ai_enabled", true)
     }
 
+    override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        inputViewActive = true
+        resumeInputView()
+    }
+
     override fun onFinishInput() {
         cancelPendingRerank()
         cancelPendingNextPrediction()
@@ -141,13 +171,25 @@ class TransformerImeService : InputMethodService() {
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
+        inputViewActive = false
         mainHandler.removeCallbacks(pulseRunnable)
+        stopDeleteRepeat()
         clearCommentOverlay()
-        pulseBackground = null
-        commentOverlay = null
-        keyboardContainer = null
-        candidateRow = null
+        // IMPORTANT: Do not null candidateRow/keyboardContainer/pulseBackground here. Android
+        // frequently reuses this View on the next input session without calling onCreateInputView.
         super.onFinishInputView(finishingInput)
+    }
+
+    private fun resumeInputView() {
+        inputRoot?.requestApplyInsets()
+        keyboardContainer?.requestApplyInsets()
+        mainHandler.removeCallbacks(pulseRunnable)
+        mainHandler.post(pulseRunnable)
+        if (japaneseMode) {
+            if (compositionBuffer.isNotEmpty()) refreshCompositionAndCandidates() else postNextPredictions()
+        } else {
+            if (englishBuffer.isNotEmpty()) showEnglishSuggestions() else postEnglishNextPredictions()
+        }
     }
 
     private fun submitInference(block: () -> Unit) {
@@ -160,7 +202,8 @@ class TransformerImeService : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
-        val minimumBottomSafe = 18.dp()
+        val minimumBottomSafe = 30.dp()
+        val maximumBottomSafe = 56.dp()
         runCatching {
             window?.window?.navigationBarColor = Color.BLACK
             window?.window?.isNavigationBarContrastEnforced = false
@@ -171,6 +214,7 @@ class TransformerImeService : InputMethodService() {
             clipChildren = false
             clipToPadding = false
         }
+        inputRoot = root
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -197,7 +241,11 @@ class TransformerImeService : InputMethodService() {
         candidateHost.addView(scroll, LinearLayout.LayoutParams(0, 50.dp(), 1f))
         content.addView(candidateHost, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 50.dp()))
 
-        val keyboardHost = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        val keyboardHost = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            clipChildren = false
+            clipToPadding = false
+        }
         pulseBackground = AudioPulseBackgroundView(this)
         keyboardHost.addView(
             pulseBackground,
@@ -208,14 +256,6 @@ class TransformerImeService : InputMethodService() {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, minimumBottomSafe)
             setBackgroundColor(Color.TRANSPARENT)
-            setOnApplyWindowInsetsListener { view, insets ->
-                val nav = insets.getInsets(WindowInsets.Type.navigationBars())
-                // Some OEM IME windows report enormous gesture insets. Keep enough room for
-                // the real nav bar without recreating the giant black footer from v0.10.2.
-                val bottom = maxOf(minimumBottomSafe, nav.bottom.coerceAtMost(30.dp()))
-                view.setPadding(0, 0, 0, bottom)
-                insets
-            }
             addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
                 val height = view.height
                 val bg = pulseBackground ?: return@addOnLayoutChangeListener
@@ -226,6 +266,21 @@ class TransformerImeService : InputMethodService() {
                 }
             }
         }
+
+        // Xiaomi/HyperOS and gesture-navigation devices can report 0 for navigationBars() in an
+        // IME window while still overlaying the gesture region. Use the union of navigation and
+        // gesture insets, add a small breathing margin, and cap only truly absurd OEM values.
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            val typeMask = WindowInsets.Type.navigationBars() or
+                WindowInsets.Type.systemGestures() or
+                WindowInsets.Type.mandatorySystemGestures()
+            val reportedBottom = insets.getInsets(typeMask).bottom
+            val safeBottom = maxOf(minimumBottomSafe, reportedBottom + 6.dp())
+                .coerceAtMost(maximumBottomSafe)
+            keyboardContainer?.setPadding(0, 0, 0, safeBottom)
+            insets
+        }
+
         keyboardHost.addView(
             keyboardContainer,
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT)
@@ -239,8 +294,6 @@ class TransformerImeService : InputMethodService() {
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
         )
 
-        // Permission-free NicoNico-style comment lane. It lives inside the IME window so it
-        // never needs SYSTEM_ALERT_WINDOW and cannot destabilize unrelated app windows.
         commentOverlay = FrameLayout(this).apply {
             isClickable = false
             isFocusable = false
@@ -253,10 +306,7 @@ class TransformerImeService : InputMethodService() {
         )
 
         renderKeyboard()
-        keyboardContainer?.requestApplyInsets()
-        mainHandler.removeCallbacks(pulseRunnable)
-        mainHandler.post(pulseRunnable)
-        if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
+        root.requestApplyInsets()
         return root
     }
 
@@ -321,7 +371,7 @@ class TransformerImeService : InputMethodService() {
             grid.addView(TextView(this).apply {
                 text = emoji; textSize = 28f; gravity = Gravity.CENTER
                 setOnClickListener {
-                    currentInputConnection?.commitText(emoji, 1)
+                    runCatching { currentInputConnection?.commitText(emoji, 1) }
                     rememberEmoji(emoji)
                     postNextPredictions()
                 }
@@ -409,7 +459,9 @@ class TransformerImeService : InputMethodService() {
                     } else if (dy < 0) FlickDirection.UP else FlickDirection.DOWN
                 }
                 when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> { cancelPendingNextPrediction(); downX = event.x; downY = event.y; isPressed = true; true }
+                    MotionEvent.ACTION_DOWN -> {
+                        cancelPendingNextPrediction(); downX = event.x; downY = event.y; isPressed = true; true
+                    }
                     MotionEvent.ACTION_MOVE -> { text = set.value(direction(event.x, event.y)); true }
                     MotionEvent.ACTION_UP -> {
                         val output = set.value(direction(event.x, event.y))
@@ -491,7 +543,7 @@ class TransformerImeService : InputMethodService() {
         var repeats = 0
         val runnable = object : Runnable {
             override fun run() {
-                if (!serviceAlive) return
+                if (!serviceAlive || !inputViewActive) return
                 handleBackspace(); repeats++
                 mainHandler.postDelayed(this, if (repeats > 12) 32L else 58L)
             }
@@ -558,7 +610,7 @@ class TransformerImeService : InputMethodService() {
 
     private fun handleUndo() {
         cancelPendingNextPrediction()
-        currentInputConnection?.performContextMenuAction(android.R.id.undo)
+        runCatching { currentInputConnection?.performContextMenuAction(android.R.id.undo) }
         if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
     }
 
@@ -571,7 +623,7 @@ class TransformerImeService : InputMethodService() {
     private fun handleJapaneseSpace() {
         cancelPendingNextPrediction(); cancelPendingRerank()
         if (compositionBuffer.isNotEmpty()) commitRawReading()
-        currentInputConnection?.commitText(" ", 1)
+        runCatching { currentInputConnection?.commitText(" ", 1) }
         postNextPredictions()
     }
 
@@ -641,7 +693,7 @@ class TransformerImeService : InputMethodService() {
         if (englishBuffer.isEmpty()) englishContext = textBeforeCursor()
         val value = if (englishShift) letter.uppercase() else letter
         englishBuffer.append(value)
-        currentInputConnection?.setComposingText(englishBuffer.toString(), 1)
+        runCatching { currentInputConnection?.setComposingText(englishBuffer.toString(), 1) }
         englishShift = false
         showEnglishSuggestions()
     }
@@ -649,10 +701,10 @@ class TransformerImeService : InputMethodService() {
     private fun showEnglishSuggestions() {
         val prefix = englishBuffer.toString()
         if (prefix.isBlank()) { postEnglishNextPredictions(); return }
-        val rag = if (!secureField) learningStore?.retrieveEnglish(prefix, englishContext, 8).orEmpty() else emptyList()
-        val base = EnglishPredictor.suggestions(prefix, englishContext, 10)
-        val pool = (rag + base).filter { it.isNotBlank() }.distinct()
-        val ranked = if (!secureField) learningStore?.rankEnglish(prefix, englishContext, pool) ?: pool else pool
+        val rag = if (!secureField) runCatching { learningStore?.retrieveEnglish(prefix, englishContext, 8).orEmpty() }.getOrDefault(emptyList()) else emptyList()
+        val base = runCatching { EnglishPredictor.suggestions(prefix, englishContext, 10) }.getOrDefault(emptyList())
+        val pool = (rag + base + prefix).filter { it.isNotBlank() }.distinct()
+        val ranked = if (!secureField) runCatching { learningStore?.rankEnglish(prefix, englishContext, pool) ?: pool }.getOrDefault(pool) else pool
         currentCandidates = ranked
         showCandidates(ranked.take(10), if (rag.isNotEmpty()) "RAG" else null, aiSlots = if (rag.isNotEmpty()) setOf(0) else emptySet()) {
             commitEnglishCandidate(it)
@@ -662,24 +714,27 @@ class TransformerImeService : InputMethodService() {
     private fun commitEnglishCandidate(word: String) {
         val prefix = englishBuffer.toString()
         val context = englishContext
-        if (!secureField) {
+        if (!secureField) runCatching {
             learningStore?.recordEnglish(prefix, word, context)
             learningStore?.recordCommitted(context, word)
         }
-        currentInputConnection?.commitText(word + " ", 1)
+        runCatching { currentInputConnection?.commitText(word + " ", 1) }
         englishBuffer.clear(); englishContext = ""; currentCandidates = emptyList()
         postEnglishNextPredictions()
     }
 
     private fun commitEnglishBuffer(addSpace: Boolean) {
-        if (englishBuffer.isEmpty()) { if (addSpace) currentInputConnection?.commitText(" ", 1); return }
+        if (englishBuffer.isEmpty()) {
+            if (addSpace) runCatching { currentInputConnection?.commitText(" ", 1) }
+            return
+        }
         val word = englishBuffer.toString()
         val context = englishContext
-        if (!secureField) {
+        if (!secureField) runCatching {
             learningStore?.recordEnglish(word, word, context)
             learningStore?.recordCommitted(context, word)
         }
-        currentInputConnection?.commitText(word + if (addSpace) " " else "", 1)
+        runCatching { currentInputConnection?.commitText(word + if (addSpace) " " else "", 1) }
         englishBuffer.clear(); englishContext = ""; currentCandidates = emptyList()
     }
 
@@ -690,21 +745,21 @@ class TransformerImeService : InputMethodService() {
 
     private fun commitEnglishPunctuation(mark: String) {
         commitEnglishBuffer(addSpace = false)
-        currentInputConnection?.commitText(mark, 1)
+        runCatching { currentInputConnection?.commitText(mark, 1) }
         postEnglishNextPredictions()
     }
 
     private fun postEnglishNextPredictions() {
         if (japaneseMode || englishBuffer.isNotEmpty()) return
         val context = textBeforeCursor()
-        val rag = if (!secureField) learningStore?.retrieveEnglish("", context, 8).orEmpty() else emptyList()
-        val base = EnglishPredictor.nextWords(context, 10)
-        val pool = (rag + base).distinct()
-        val ranked = if (!secureField) learningStore?.rankEnglish("", context, pool) ?: pool else pool
+        val rag = if (!secureField) runCatching { learningStore?.retrieveEnglish("", context, 8).orEmpty() }.getOrDefault(emptyList()) else emptyList()
+        val base = runCatching { EnglishPredictor.nextWords(context, 10) }.getOrDefault(emptyList())
+        val pool = (rag + base).filter { it.isNotBlank() }.distinct()
+        val ranked = if (!secureField) runCatching { learningStore?.rankEnglish("", context, pool) ?: pool }.getOrDefault(pool) else pool
         currentCandidates = ranked
         showCandidates(ranked.take(10), if (rag.isNotEmpty()) "RAG" else null, aiSlots = if (rag.isNotEmpty()) setOf(0) else emptySet()) {
-            if (!secureField) learningStore?.recordEnglish("", it, context)
-            currentInputConnection?.commitText(it + " ", 1)
+            if (!secureField) runCatching { learningStore?.recordEnglish("", it, context) }
+            runCatching { currentInputConnection?.commitText(it + " ", 1) }
             postEnglishNextPredictions()
         }
     }
@@ -717,17 +772,27 @@ class TransformerImeService : InputMethodService() {
         val reading = compositionBuffer.toString()
         currentReading = reading
         if (reading.isEmpty()) {
-            currentCandidates = emptyList(); currentInputConnection?.finishComposingText(); postNextPredictions(); return
+            currentCandidates = emptyList()
+            runCatching { currentInputConnection?.finishComposingText() }
+            postNextPredictions()
+            return
         }
-        currentInputConnection?.setComposingText(reading, 1)
-        val rag = if (!secureField) learningStore?.retrieveConversions(reading, 6).orEmpty() else emptyList()
-        val base = (rag + CandidateGenerator.candidates(reading)).distinct()
-        val personalized = if (!secureField) learningStore?.rankConversions(reading, base) ?: base else base
-        val tinyRanked = if (aiActive()) model?.rankCandidates(compositionContext, personalized) ?: personalized else personalized
-        val visible = if (aiActive() && tinyRanked.isNotEmpty()) forceRawReadingSecond(tinyRanked.first(), reading, tinyRanked.drop(1)) else personalized
+
+        runCatching { currentInputConnection?.setComposingText(reading, 1) }
+        val rag = if (!secureField) runCatching { learningStore?.retrieveConversions(reading, 6).orEmpty() }.getOrDefault(emptyList()) else emptyList()
+        val dictionary = runCatching { CandidateGenerator.candidates(reading) }.getOrElse { listOf(reading) }
+        val base = (rag + dictionary + reading).filter { it.isNotBlank() }.distinct()
+        val personalized = if (!secureField) runCatching { learningStore?.rankConversions(reading, base) ?: base }.getOrDefault(base) else base
+        val tinyRanked = if (aiActive()) runCatching { model?.rankCandidates(compositionContext, personalized) ?: personalized }.getOrDefault(personalized) else personalized
+        val stableRanked = if (tinyRanked.isEmpty()) listOf(reading) else tinyRanked
+        val visible = if (aiActive()) forceRawReadingSecond(stableRanked.first(), reading, stableRanked.drop(1)) else stableRanked
         currentCandidates = visible
-        showCandidates(visible, if (aiActive() && visible.isNotEmpty()) if (rag.isNotEmpty()) "✦·R" else "✦" else null, aiSlots = setOf(0)) { commitCandidate(it) }
-        scheduleMediumRerank(reading, (rag + tinyRanked).distinct(), rag.isNotEmpty())
+        showCandidates(
+            visible,
+            if (aiActive() && visible.isNotEmpty()) if (rag.isNotEmpty()) "✦·R" else "✦" else null,
+            aiSlots = if (visible.isNotEmpty() && aiActive()) setOf(0) else emptySet()
+        ) { commitCandidate(it) }
+        scheduleMediumRerank(reading, (rag + stableRanked).distinct(), rag.isNotEmpty())
     }
 
     private fun scheduleMediumRerank(reading: String, candidates: List<String>, ragUsed: Boolean) {
@@ -738,12 +803,17 @@ class TransformerImeService : InputMethodService() {
         val contextSnapshot = compositionContext
         val snapshot = candidates.toList()
         val runnable = Runnable {
-            if (!serviceAlive || epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@Runnable
+            if (!serviceAlive || !inputViewActive || epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@Runnable
             submitInference {
+                // The runnable may have waited behind a previous native call. Re-check immediately
+                // before spending another 10-way inference on text the user already changed.
+                if (!serviceAlive || !inputViewActive || epoch != candidateEpoch || currentReading != reading || compositionBuffer.toString() != reading) return@submitInference
                 val result = runCatching { medium.rerank(contextSnapshot, reading, snapshot) }.getOrNull() ?: return@submitInference
-                val rawSecond = if (result.candidates.isNotEmpty()) forceRawReadingSecond(result.candidates.first(), reading, result.candidates.drop(1)) else result.candidates
+                val rawSecond = if (result.candidates.isNotEmpty()) {
+                    forceRawReadingSecond(result.candidates.first(), reading, result.candidates.drop(1))
+                } else listOf(reading)
                 mainHandler.post {
-                    if (!serviceAlive || epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@post
+                    if (!serviceAlive || !inputViewActive || epoch != candidateEpoch || currentReading != reading || compositionBuffer.isEmpty()) return@post
                     currentCandidates = rawSecond
                     val dictionaryTag = if (CandidateGenerator.extendedDictionaryReady) "·D" else ""
                     val ragTag = if (ragUsed) "·R" else ""
@@ -752,13 +822,13 @@ class TransformerImeService : InputMethodService() {
             }
         }
         pendingMediumRerank = runnable
-        mainHandler.postDelayed(runnable, 80L)
+        mainHandler.postDelayed(runnable, 90L)
     }
 
     private fun forceRawReadingSecond(aiCandidate: String, reading: String, rest: List<String>): List<String> = buildList {
         add(aiCandidate); add(reading)
         rest.forEach { if (it != aiCandidate && it != reading) add(it) }
-    }.distinct()
+    }.filter { it.isNotBlank() }.distinct()
 
     private fun postNextPredictions() {
         cancelPendingNextPrediction(incrementEpoch = false)
@@ -768,11 +838,11 @@ class TransformerImeService : InputMethodService() {
         }
         val context = textBeforeCursor()
         if (context.isBlank()) { showCandidates(emptyList(), null) { }; return }
-        val rag = if (!secureField) learningStore?.retrieveNext(context, 8).orEmpty() else emptyList()
-        val tiny = model?.predictNext(context, 8).orEmpty().map { it.text }
-        val generated = NextCandidateGenerator.candidates(context, tiny)
+        val rag = if (!secureField) runCatching { learningStore?.retrieveNext(context, 8).orEmpty() }.getOrDefault(emptyList()) else emptyList()
+        val tiny = runCatching { model?.predictNext(context, 8).orEmpty().map { it.text } }.getOrDefault(emptyList())
+        val generated = runCatching { NextCandidateGenerator.candidates(context, tiny) }.getOrDefault(emptyList())
         val rawPool = (rag + generated).filter { it.isNotBlank() }.distinct()
-        val pool = if (!secureField) learningStore?.rankNext(context, rawPool) ?: rawPool else rawPool
+        val pool = if (!secureField) runCatching { learningStore?.rankNext(context, rawPool) ?: rawPool }.getOrDefault(rawPool) else rawPool
         if (pool.isEmpty()) { showCandidates(emptyList(), null) { }; return }
         currentCandidates = pool
         showCandidates(pool.take(10), if (rag.isNotEmpty()) "✦次·R" else "✦次", aiSlots = setOf(0)) { commitPrediction(it) }
@@ -786,47 +856,47 @@ class TransformerImeService : InputMethodService() {
         val contextTail = context.takeLast(180)
         val pool = candidates.toList()
         val runnable = Runnable {
-            if (!serviceAlive || epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@Runnable
+            if (!serviceAlive || !inputViewActive || epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@Runnable
             submitInference {
+                if (!serviceAlive || !inputViewActive || epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@submitInference
                 val result = runCatching { medium.rerank(contextTail, "", pool) }.getOrNull() ?: return@submitInference
-                if (!serviceAlive) return@submitInference
                 mainHandler.post {
-                    if (!serviceAlive || epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@post
+                    if (!serviceAlive || !inputViewActive || epoch != predictionEpoch || compositionBuffer.isNotEmpty() || !japaneseMode) return@post
                     if (textBeforeCursor().takeLast(180) != contextTail) return@post
                     val ai = result.candidates.firstOrNull()
                     val rest = result.candidates.drop(1)
-                    val rankedRest = if (!secureField) learningStore?.rankNext(contextTail, rest) ?: rest else rest
-                    val visible = (listOfNotNull(ai) + rankedRest).distinct()
+                    val rankedRest = if (!secureField) runCatching { learningStore?.rankNext(contextTail, rest) ?: rest }.getOrDefault(rest) else rest
+                    val visible = (listOfNotNull(ai) + rankedRest).filter { it.isNotBlank() }.distinct()
                     currentCandidates = visible
                     val ragTag = if (ragUsed) "·R" else ""
-                    showCandidates(visible.take(10), "✦次Z95×10$ragTag ${result.latencyMs}ms", aiSlots = setOf(0)) { commitPrediction(it) }
+                    showCandidates(visible.take(10), "✦次Z95×10$ragTag ${result.latencyMs}ms", aiSlots = if (visible.isNotEmpty()) setOf(0) else emptySet()) { commitPrediction(it) }
                 }
             }
         }
         pendingNextPrediction = runnable
-        mainHandler.postDelayed(runnable, 60L)
+        mainHandler.postDelayed(runnable, 80L)
     }
 
     private fun commitCandidate(candidate: String) {
         cancelPendingNextPrediction(); cancelPendingRerank()
         val reading = currentReading
         val context = compositionContext
-        if (!secureField && reading.isNotBlank()) {
+        if (!secureField && reading.isNotBlank()) runCatching {
             learningStore?.recordConversion(reading, candidate)
             learningStore?.recordCommitted(context, candidate)
         }
-        currentInputConnection?.commitText(candidate, 1)
+        runCatching { currentInputConnection?.commitText(candidate, 1) }
         clearCompositionState(); postNextPredictions()
     }
 
     private fun commitPrediction(prediction: String) {
         cancelPendingNextPrediction()
         val context = textBeforeCursor()
-        if (!secureField && context.isNotBlank()) {
+        if (!secureField && context.isNotBlank()) runCatching {
             learningStore?.recordNext(context, prediction)
             learningStore?.recordCommitted(context, prediction)
         }
-        currentInputConnection?.commitText(prediction, 1)
+        runCatching { currentInputConnection?.commitText(prediction, 1) }
         postNextPredictions()
     }
 
@@ -834,8 +904,8 @@ class TransformerImeService : InputMethodService() {
         cancelPendingNextPrediction(); cancelPendingRerank()
         val raw = compositionBuffer.toString()
         if (raw.isBlank()) return
-        if (!secureField) learningStore?.recordCommitted(compositionContext, raw)
-        currentInputConnection?.commitText(raw, 1)
+        if (!secureField) runCatching { learningStore?.recordCommitted(compositionContext, raw) }
+        runCatching { currentInputConnection?.commitText(raw, 1) }
         clearCompositionState()
         postNextPredictions()
     }
@@ -845,13 +915,15 @@ class TransformerImeService : InputMethodService() {
         if (compositionBuffer.isNotEmpty()) {
             val candidate = currentCandidates.firstOrNull() ?: currentReading
             val context = compositionContext
-            if (!secureField) {
+            if (!secureField) runCatching {
                 learningStore?.recordConversion(currentReading, candidate)
                 learningStore?.recordCommitted(context, candidate)
             }
-            currentInputConnection?.commitText(candidate, 1); clearCompositionState()
+            runCatching { currentInputConnection?.commitText(candidate, 1) }
+            clearCompositionState()
         }
-        currentInputConnection?.commitText(mark, 1); postNextPredictions()
+        runCatching { currentInputConnection?.commitText(mark, 1) }
+        postNextPredictions()
     }
 
     // ------------------------------------------------------------
@@ -863,20 +935,30 @@ class TransformerImeService : InputMethodService() {
         if (!japaneseMode && englishBuffer.isNotEmpty()) {
             englishBuffer.deleteCharAt(englishBuffer.lastIndex)
             if (englishBuffer.isEmpty()) {
-                currentInputConnection?.setComposingText("", 1); currentInputConnection?.finishComposingText(); englishContext = ""; postEnglishNextPredictions()
+                runCatching {
+                    currentInputConnection?.setComposingText("", 1)
+                    currentInputConnection?.finishComposingText()
+                }
+                englishContext = ""; postEnglishNextPredictions()
             } else {
-                currentInputConnection?.setComposingText(englishBuffer.toString(), 1); showEnglishSuggestions()
+                runCatching { currentInputConnection?.setComposingText(englishBuffer.toString(), 1) }
+                showEnglishSuggestions()
             }
             return
         }
         if (compositionBuffer.isNotEmpty()) {
             compositionBuffer.deleteCharAt(compositionBuffer.lastIndex)
             if (compositionBuffer.isEmpty()) {
-                currentReading = ""; currentCandidates = emptyList(); currentInputConnection?.setComposingText("", 1); currentInputConnection?.finishComposingText(); compositionContext = ""; postNextPredictions()
+                currentReading = ""; currentCandidates = emptyList()
+                runCatching {
+                    currentInputConnection?.setComposingText("", 1)
+                    currentInputConnection?.finishComposingText()
+                }
+                compositionContext = ""; postNextPredictions()
             } else refreshCompositionAndCandidates()
             return
         }
-        currentInputConnection?.deleteSurroundingText(1, 0)
+        runCatching { currentInputConnection?.deleteSurroundingText(1, 0) }
         if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
     }
 
@@ -886,21 +968,21 @@ class TransformerImeService : InputMethodService() {
             commitEnglishBuffer(false)
             return
         }
-        // Enter is explicit raw commit in Japanese composition. Only tapping a candidate
-        // performs kana-kanji conversion.
         if (compositionBuffer.isNotEmpty()) {
             commitRawReading()
             return
         }
-        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
-        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+        runCatching {
+            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+        }
         if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
     }
 
     private fun commitDirect(text: String) {
         if (compositionBuffer.isNotEmpty()) commitRawReading()
         if (englishBuffer.isNotEmpty()) commitEnglishBuffer(false)
-        currentInputConnection?.commitText(text, 1)
+        runCatching { currentInputConnection?.commitText(text, 1) }
         if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
     }
 
@@ -913,15 +995,20 @@ class TransformerImeService : InputMethodService() {
         if (compositionBuffer.isNotEmpty()) commitRawReading()
         if (englishBuffer.isNotEmpty()) commitEnglishBuffer(false)
         japaneseMode = toJapanese; englishShift = false; renderKeyboard()
+        inputRoot?.requestApplyInsets()
         if (japaneseMode) postNextPredictions() else postEnglishNextPredictions()
     }
 
     private fun cancelPendingRerank(incrementEpoch: Boolean = true) {
-        pendingMediumRerank?.let(mainHandler::removeCallbacks); pendingMediumRerank = null; if (incrementEpoch) candidateEpoch++
+        pendingMediumRerank?.let(mainHandler::removeCallbacks)
+        pendingMediumRerank = null
+        if (incrementEpoch) candidateEpoch++
     }
 
     private fun cancelPendingNextPrediction(incrementEpoch: Boolean = true) {
-        pendingNextPrediction?.let(mainHandler::removeCallbacks); pendingNextPrediction = null; if (incrementEpoch) predictionEpoch++
+        pendingNextPrediction?.let(mainHandler::removeCallbacks)
+        pendingNextPrediction = null
+        if (incrementEpoch) predictionEpoch++
     }
 
     private fun showCandidates(
@@ -954,10 +1041,10 @@ class TransformerImeService : InputMethodService() {
     }
 
     private fun emitNicoComment(candidate: String) {
-        if (secureField || candidate.isBlank()) return
+        if (secureField || candidate.isBlank() || !inputViewActive) return
         val overlay = commentOverlay ?: return
         overlay.post {
-            if (!serviceAlive || overlay.width <= 0 || overlay.parent == null) return@post
+            if (!serviceAlive || !inputViewActive || overlay.width <= 0 || overlay.parent == null) return@post
             val label = TextView(this).apply {
                 text = "$candidate wwww"
                 textSize = 18f
@@ -988,7 +1075,10 @@ class TransformerImeService : InputMethodService() {
         overlay.removeAllViews()
     }
 
-    private fun textBeforeCursor(): String = currentInputConnection?.getTextBeforeCursor(260, 0)?.toString().orEmpty()
+    private fun textBeforeCursor(): String = runCatching {
+        currentInputConnection?.getTextBeforeCursor(260, 0)?.toString().orEmpty()
+    }.getOrDefault("")
+
     private fun aiActive(): Boolean = aiEnabledByUser && !secureField && model != null
 
     private fun isPasswordField(info: EditorInfo): Boolean {
@@ -1007,10 +1097,7 @@ class TransformerImeService : InputMethodService() {
     private fun japaneseCenterParams() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.18f)
     private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 55.dp())
 
-    /**
-     * v0.10.4 keeps a continuous faint gradient higher into the key field. Silence remains
-     * true black, while the bottom edge is still the apparent light source.
-     */
+    /** Continuous bottom-up Audio Pulse background. */
     private class AudioPulseBackgroundView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private var audioEnabled = false
@@ -1057,8 +1144,7 @@ class TransformerImeService : InputMethodService() {
                 else -> blend(Color.rgb(255, 52, 112), orange, (energy - 0.92f) / 0.08f)
             }
 
-            // Longer feather than v0.10.3: no visible horizontal cutoff between key rows.
-            val glowHeight = height * (0.48f + energy * 0.40f + beat * 0.04f)
+            val glowHeight = height * (0.52f + energy * 0.42f + beat * 0.04f)
             val topY = (height - glowHeight).coerceAtLeast(0f)
             val bottomAlpha = (46 + energy * 174 + beat * 18).toInt().coerceIn(0, 242)
             val midAlpha = (bottomAlpha * (0.50f + energy * 0.16f)).toInt()
@@ -1069,12 +1155,12 @@ class TransformerImeService : InputMethodService() {
                 0f, topY, 0f, height.toFloat(),
                 intArrayOf(
                     Color.TRANSPARENT,
-                    withAlpha(soft, (midAlpha * 0.08f).toInt()),
-                    withAlpha(soft, (midAlpha * 0.30f).toInt()),
+                    withAlpha(soft, (midAlpha * 0.06f).toInt()),
+                    withAlpha(soft, (midAlpha * 0.26f).toInt()),
                     withAlpha(reactive, midAlpha),
                     withAlpha(bright, bottomAlpha)
                 ),
-                floatArrayOf(0f, 0.18f, 0.46f, 0.76f, 1f),
+                floatArrayOf(0f, 0.16f, 0.44f, 0.76f, 1f),
                 Shader.TileMode.CLAMP
             )
             canvas.drawRect(0f, topY, width.toFloat(), height.toFloat(), paint)
