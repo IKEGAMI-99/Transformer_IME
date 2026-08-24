@@ -114,8 +114,8 @@ jobs:
           assert path.read_bytes()[:4] == b'GGUF'
           assert path.stat().st_size > 65_000_000
           result = {
-              'version': '0.10.2',
-              'design': 'single Zenzai v3.2; 10-way conversion and next prediction; one visible AI candidate + raw reading second; Personal RAG; 4x4 number pad; 320dp bottom-glow Audio Pulse with transparent keys and silence gate',
+              'version': '0.10.3',
+              'design': 'single Zenzai v3.2; 10-way conversion and next prediction; Personal RAG; 4x4 number pad; in-memory Audio Pulse transport; raised peak headroom; compact navigation padding',
               'estimated_total_parameters': 95_100_000,
               'quantization': 'Q5_K_M',
               'inference_trials': 10,
@@ -161,35 +161,30 @@ jobs:
           test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
-      - name: Verify v0.10.2 architecture
+      - name: Verify v0.10.3 architecture
         run: |
           IME=app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
           PULSE=app/src/main/java/com/ikegami/transformerime/audio/AudioPulseService.kt
-          grep -q "versionName '0.10.2'" app/build.gradle
+          STATE=app/src/main/java/com/ikegami/transformerime/audio/AudioPulseState.kt
+          grep -q "versionName '0.10.3'" app/build.gradle
           grep -q 'INFERENCE_TRIALS = 10' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
-          grep -q 'generateCandidates(0, prompt, maxTokens, INFERENCE_TRIALS)' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
-          grep -q 'generateCandidates(0, prompt, NEXT_MAX_TOKENS, INFERENCE_TRIALS)' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
-          grep -q 'std::clamp(branches, 1, 12)' app/src/main/cpp/zenz_jni.cpp
           grep -q 'forceRawReadingSecond' "$IME"
           grep -q '✦Z95×10' "$IME"
-          grep -q 'aiSlots = setOf(0)' "$IME"
-          grep -q 'UserLearningStore' "$IME"
           grep -q 'private fun renderNumberPanel' "$IME"
-          grep -q 'listOf("1", "2", "3", "⌫")' "$IME"
-          ! grep -q 'showNumberFan' "$IME"
-          ! grep -q 'PopupWindow' "$IME"
-          grep -q '320.dp()' "$IME"
+          grep -q 'AudioPulseState.level' "$IME"
+          grep -q 'mainHandler.postDelayed(this, 40L)' "$IME"
+          grep -q 'val minimumBottomSafe = 8.dp()' "$IME"
+          grep -q 'maxOf(minimumBottomSafe, nav.bottom)' "$IME"
+          grep -q 'addOnLayoutChangeListener' "$IME"
+          ! grep -q '320.dp()' "$IME"
+          grep -q 'energy < 0.92f' "$IME"
           grep -q 'private val KEY_BLACK = Color.TRANSPARENT' "$IME"
-          grep -q 'val glowHeight = height \*' "$IME"
-          grep -q 'height \* 1.04f' "$IME"
-          grep -q 'if (energy <= 0f) return' "$IME"
-          grep -q 'Color.TRANSPARENT' "$IME"
-          grep -q 'val cyan = Color.rgb(0, 178, 255)' "$IME"
-          grep -q 'val orange = Color.rgb(255, 112, 36)' "$IME"
-          grep -q 'log10' "$PULSE"
-          grep -q 'val rmsDb =' "$PULSE"
-          grep -q 'mixed < 0.035f' "$PULSE"
-          grep -q 'envelope < 0.012f' "$PULSE"
+          grep -q 'AudioPulseState.publish(envelope)' "$PULSE"
+          grep -q 'gated.pow(1.45f)' "$PULSE"
+          grep -q 'rmsDb + 48f' "$PULSE"
+          grep -q 'samplePeak.toFloat() - 0.04f' "$PULSE"
+          ! grep -q 'putFloat(KEY_LEVEL, envelope)' "$PULSE"
+          grep -q '@Volatile var level' "$STATE"
           test ! -f app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf
 
       - uses: actions/setup-java@v4
@@ -233,13 +228,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.2-Zenzai95M-x10-BottomGlow-debug
+          name: Transformer-IME-v0.10.3-Zenzai95M-x10-StablePulse-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.10.2 metadata
+      - name: Upload v0.10.3 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.2-metadata
+          name: Transformer-IME-v0.10.3-metadata
           path: |
             app/src/main/assets/zenzai95.meta.json
             app/src/main/assets/mozc_compact.meta.json
