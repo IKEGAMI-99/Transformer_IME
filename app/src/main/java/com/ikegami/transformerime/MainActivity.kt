@@ -11,7 +11,6 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
-import com.ikegami.transformerime.model.MediumMoETransformer
 
 class MainActivity : Activity() {
     private fun Int.dp(): Int = (this * resources.displayMetrics.density).toInt()
@@ -30,13 +29,13 @@ class MainActivity : Activity() {
             textSize = 30f
         })
         root.addView(TextView(this).apply {
-            text = "v0.7.0 · Predictive Mozc + Corpus Context + JP21M"
+            text = "v0.8.0 · Mozc draft + Zenzai ~190M cascade"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 28.dp())
         })
 
         root.addView(TextView(this).apply {
-            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n日本語は黒基調の12キーフリック、英数はQWERTYです。v0.7では小文字入力を優先する修飾キーと、約2,115万parameterの日本語Transformerを搭載しました。入力内容は外部サーバーへ送信しません。"
+            text = "1. Androidのキーボード設定で Transformer IME を有効にします。\n2. 入力方法から Transformer IME を選択します。\n\n日本語は黒基調の12キーフリック、英数はQWERTYです。v0.8ではazooKey/Zenzaiの方式を参考に、かな漢字変換専用のZenzモデルをオンデバイスで使います。入力内容は外部サーバーへ送信しません。"
             textSize = 17f
             setLineSpacing(0f, 1.2f)
         })
@@ -58,7 +57,7 @@ class MainActivity : Activity() {
         })
 
         val aiSwitch = Switch(this).apply {
-            text = "Transformer候補ランキング / 次候補予測"
+            text = "Zenzai変換 / 文脈予測"
             textSize = 17f
             gravity = Gravity.CENTER_VERTICAL
             isChecked = prefs.getBoolean("ai_enabled", true)
@@ -69,21 +68,23 @@ class MainActivity : Activity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "v0.7 構成\n" +
+            text = "v0.8 構成\n" +
                 "・小文字優先: つ→っ→づ、う→ぅ→ゔ\n" +
-                "・通常変換: Mozc OSS由来SQLite辞書 + 読み前方一致予測\n" +
-                "・次候補: Tatoeba日本語文由来の文脈DB + Tiny候補\n" +
-                "・最終順位: 日本語学習済みJP21Mで再ランキング\n" +
-                "・Japanese MoE: 約21.15M parameters / ${MediumMoETransformer.LAYERS} layers / ${MediumMoETransformer.EXPERTS} experts / hidden ${MediumMoETransformer.DIM}\n" +
-                "・語彙hash 4096 / context ${MediumMoETransformer.CONTEXT_LENGTH}\n\n" +
-                "Top-1 MoEなので総parameter数より実計算量を抑えています。"
+                "・ドラフト変換: Mozc OSS由来SQLite辞書 + ビーム探索\n" +
+                "・Primary: zenz-v3.2-small Q5_K_M 約95.1M parameters\n" +
+                "・Second opinion: zenz-v3.1-small Q5_K_M 約95.1M parameters\n" +
+                "・合計: 約190.2M parameters（通常はPrimaryだけ推論）\n" +
+                "・Zenzai v3形式: 左文脈 + 読み + 出力を直接モデル評価\n" +
+                "・弱い/不一致時だけ2モデル目を使うカスケード\n" +
+                "・推論: llama.cpp / arm64 / GGUF Q5_K_M\n\n" +
+                "辞書を捨てずにドラフトとして使い、ニューラル変換で検証・補正する構成です。"
             textSize = 14f
             setPadding(0, 18.dp(), 0, 0)
             setLineSpacing(0f, 1.15f)
         })
 
         root.addView(TextView(this).apply {
-            text = "UIは一般的な日本語12キー配列とダーク配色を参考にした独自実装です。Google/Gboardのロゴ・画像・専用アセットは使用していません。"
+            text = "Zenzai/Zenzの設計を参考にしたAndroid実装です。モデル・辞書・llama.cppの各ライセンス情報はリポジトリ内のTHIRD_PARTY_MODELS.mdを参照してください。"
             textSize = 12f
             setPadding(0, 20.dp(), 0, 0)
         })

@@ -12,3 +12,6 @@ app/src/main/assets/mozc_compact.db
 app/src/main/assets/mozc_compact.meta.json
 app/src/main/assets/context_predictions.db
 app/src/main/assets/context_predictions.meta.json
+app/src/main/assets/zenz-v3.2-small-Q5_K_M.gguf
+app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf
+app/src/main/cpp/llama.cpp/
