@@ -15,10 +15,11 @@ Android向けの、完全オンデバイス小型Transformerを組み込んだ�
 - AI ON/OFF
 - パスワード欄ではAI予測を停止
 - `INTERNET` permissionなし
+- 学習済みPoCモデルをアプリ内に同梱
 
 ## Transformer PoC
 
-現在同梱予定のモデルは配線・速度検証用の極小モデルです。
+現在のモデルは配線・速度検証用の極小モデルです。
 
 - 1 Transformer block
 - hidden size: 24
@@ -30,6 +31,8 @@ Android向けの、完全オンデバイス小型Transformerを組み込んだ�
 
 最終目標の5M〜30M parameterモデルではありません。まずIMEのキー入力から候補表示までのホットパスにTransformer推論を安全に組み込み、次の段階でモデルを大型化します。
 
+GitHub上ではバイナリ重みを `tiny_transformer.b64.0` 〜 `.3` の4ファイルに分割して格納し、IME起動時にメモリ上で復号します。入力データやモデル推論のためのネットワーク通信は行いません。
+
 Android側では外部MLランタイムを使わず、Kotlinで以下を直接実装しています。
 
 1. Token Embedding + Position Embedding
@@ -39,6 +42,8 @@ Android側では外部MLランタイムを使わず、Kotlinで以下を直接�
 5. FFN + GELU
 6. Final LayerNorm
 7. Vocabulary projection
+
+学習スクリプトは `tools/train_tiny_transformer.py` に置いてあります。
 
 ## プライバシー
 
@@ -64,7 +69,6 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## 次の実装
 
-- 学習済み `tiny_transformer.bin` のリポジトリ追加
 - 辞書の大幅拡張
 - 文節変換
 - 5M〜30M parameterモデルへの差し替え
