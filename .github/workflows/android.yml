@@ -12,22 +12,79 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restore trained Japanese model
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/src/main/assets/medium_moe_jpn.q8
+            app/src/main/assets/medium_moe_jpn.meta.json
+          key: jp-medium-moe-v3-${{ hashFiles('tools/train_medium_moe_japanese.py') }}
+
+      - name: Install CPU PyTorch
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Train 5M Japanese MoE
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          python tools/train_medium_moe_japanese.py \
+            --output app/src/main/assets/medium_moe_jpn.q8 \
+            --metadata app/src/main/assets/medium_moe_jpn.meta.json \
+            --steps 1800 \
+            --max-sentences 80000 \
+            --batch-size 24
+
+      - name: Verify Japanese model asset
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          model = Path('app/src/main/assets/medium_moe_jpn.q8')
+          meta = Path('app/src/main/assets/medium_moe_jpn.meta.json')
+          assert model.exists() and model.stat().st_size > 5_000_000
+          assert model.read_bytes()[:4] == b'MMJQ'
+          info = json.loads(meta.read_text(encoding='utf-8'))
+          assert info['parameter_count'] >= 5_000_000
+          assert info['training']['corpus'].startswith('Tatoeba')
+          print('Japanese model verified:', info['parameter_count'], 'params,', model.stat().st_size, 'bytes')
+          PY
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.0'
+
       - uses: android-actions/setup-android@v3
+
       - name: Install Android SDK 36
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
       - name: Run unit tests
         run: gradle :app:testDebugUnitTest --stacktrace
+
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-debug
+          name: Transformer-IME-v0.3.0-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload model metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transformer-IME-v0.3.0-model-metadata
+          path: app/src/main/assets/medium_moe_jpn.meta.json
