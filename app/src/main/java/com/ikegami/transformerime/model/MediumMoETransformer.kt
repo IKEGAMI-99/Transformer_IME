@@ -32,9 +32,13 @@ class MediumMoETransformer private constructor(
         }
     }
 
-    fun close() {
-        engine?.close()
-    }
+    /**
+     * The active Zenzai instance is process-scoped. InputMethodService instances can be
+     * recreated while a native inference is still unwinding, so closing the model from an
+     * individual service lifecycle can race llama.cpp and crash the process. The Android
+     * process owns the shared engine and the OS reclaims it when the process exits.
+     */
+    fun close() = Unit
 
     companion object {
         const val DIM = 0
@@ -46,21 +50,28 @@ class MediumMoETransformer private constructor(
         const val CONTEXT_LENGTH = 256
         private const val EXPECTED_TOTAL = 80_000_000L
 
+        @Volatile private var sharedInstance: MediumMoETransformer? = null
+
+        @Synchronized
         fun load(context: Context): MediumMoETransformer {
-            val engine = Zenzai190MEngine(context)
+            sharedInstance?.let { return it }
+
+            val engine = Zenzai190MEngine(context.applicationContext)
             val ready = runCatching { engine.initialize() }.getOrDefault(false)
             val params = engine.totalParameters
-            return if (ready && params >= EXPECTED_TOTAL) {
+            val result = if (ready && params >= EXPECTED_TOTAL) {
                 MediumMoETransformer(
                     engine = engine,
                     corpusTrained = true,
-                    sourceLabel = "Zenzai zenz-v3.2 · 95.1M · Q5_K_M · 10/12-way decoding",
+                    sourceLabel = "Zenzai zenz-v3.2 · 95.1M · Q5_K_M · 10-way decoding",
                     parameterCount = params.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
                 )
             } else {
                 runCatching { engine.close() }
                 create()
             }
+            sharedInstance = result
+            return result
         }
 
         fun create(): MediumMoETransformer = MediumMoETransformer(
