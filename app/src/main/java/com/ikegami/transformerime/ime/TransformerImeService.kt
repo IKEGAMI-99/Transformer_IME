@@ -66,11 +66,10 @@ class TransformerImeService : InputMethodService() {
 
     private val pulseRunnable = object : Runnable {
         override fun run() {
-            val prefs = getSharedPreferences(AudioPulseService.PREFS, Context.MODE_PRIVATE)
-            val enabled = prefs.getBoolean(AudioPulseService.KEY_ENABLED, false)
-            val level = if (enabled) prefs.getFloat(AudioPulseService.KEY_LEVEL, 0f) else 0f
+            val enabled = AudioPulseService.liveActive
+            val level = if (enabled) AudioPulseService.liveLevel else 0f
             pulseBackground?.setPulse(level, enabled)
-            if (pulseBackground != null) mainHandler.postDelayed(this, 33L)
+            if (pulseBackground != null) mainHandler.postDelayed(this, 40L)
         }
     }
 
@@ -127,7 +126,7 @@ class TransformerImeService : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
-        val minimumBottomSafe = 44.dp()
+        val minimumBottomSafe = 6.dp()
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
 
         val content = LinearLayout(this).apply {
@@ -163,7 +162,7 @@ class TransformerImeService : InputMethodService() {
             pulseBackground,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                320.dp(),
+                300.dp(),
                 Gravity.BOTTOM
             )
         )
@@ -173,12 +172,12 @@ class TransformerImeService : InputMethodService() {
             setPadding(0, 0, 0, minimumBottomSafe)
             setBackgroundColor(Color.TRANSPARENT)
             setOnApplyWindowInsetsListener { view, insets ->
+                // Gesture insets can be much taller than the actual navigation affordance on
+                // some Xiaomi devices. Using them as keyboard padding created the giant black
+                // strip seen in v0.10.2. Keep only a small capped navigation-bar allowance.
                 val nav = insets.getInsets(WindowInsets.Type.navigationBars())
-                val gestures = insets.getInsets(WindowInsets.Type.systemGestures())
-                val mandatory = insets.getInsets(WindowInsets.Type.mandatorySystemGestures())
-                val tappable = insets.getInsets(WindowInsets.Type.tappableElement())
-                val bottom = maxOf(nav.bottom, gestures.bottom, mandatory.bottom, tappable.bottom)
-                view.setPadding(0, 0, 0, maxOf(minimumBottomSafe, bottom + 8.dp()))
+                val navAllowance = minOf(nav.bottom, 12.dp())
+                view.setPadding(0, 0, 0, maxOf(minimumBottomSafe, navAllowance + 2.dp()))
                 insets
             }
         }
@@ -848,8 +847,9 @@ class TransformerImeService : InputMethodService() {
     private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 55.dp())
 
     /**
-     * v0.10.2 bottom-glow renderer. The key area is black at silence. Audio only adds light
-     * from the bottom edge upward, rather than painting the whole keyboard a solid colour.
+     * v0.10.3 bottom-glow renderer. Colour is driven mainly by sustained level while the
+     * transient beat envelope drives brightness/height, preventing every kick from turning
+     * the whole keyboard red.
      */
     private class AudioPulseBackgroundView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -862,23 +862,27 @@ class TransformerImeService : InputMethodService() {
         fun setPulse(value: Float, enabled: Boolean) {
             audioEnabled = enabled
             val v = value.coerceIn(0f, 1f)
+            val oldSmoothed = smoothed
+            val oldBeat = beat
             val rise = (v - previousTarget).coerceAtLeast(0f)
-            if (rise > 0.015f) {
-                beat = maxOf(beat, (rise * 4.8f + v * 0.30f).coerceIn(0f, 1f))
+            if (rise > 0.016f) {
+                beat = maxOf(beat, (rise * 4.2f + v * 0.22f).coerceIn(0f, 1f))
             }
             previousTarget = v
             target = v
             smoothed = if (target > smoothed) {
-                smoothed * 0.18f + target * 0.82f
+                smoothed * 0.22f + target * 0.78f
             } else {
-                smoothed * 0.78f + target * 0.22f
+                smoothed * 0.82f + target * 0.18f
             }
-            beat *= 0.78f
-            if (target < 0.01f && smoothed < 0.018f && beat < 0.018f) {
+            beat *= 0.80f
+            if (target < 0.008f && smoothed < 0.014f && beat < 0.014f) {
                 smoothed = 0f
                 beat = 0f
             }
-            invalidate()
+            if (abs(oldSmoothed - smoothed) > 0.002f || abs(oldBeat - beat) > 0.002f || !enabled) {
+                invalidate()
+            }
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -886,28 +890,29 @@ class TransformerImeService : InputMethodService() {
             canvas.drawColor(Color.BLACK)
             if (!audioEnabled || width <= 0 || height <= 0) return
 
-            val rawEnergy = (smoothed * 0.82f + beat * 0.48f).coerceIn(0f, 1f)
-            val energy = if (rawEnergy < 0.018f) 0f
-            else ((rawEnergy - 0.018f) / 0.982f).coerceIn(0f, 1f)
-            if (energy <= 0f) return
+            val colorEnergy = smoothed.coerceIn(0f, 1f)
+            val pulseEnergy = (smoothed * 0.88f + beat * 0.35f).coerceIn(0f, 1f)
+            if (pulseEnergy < 0.012f) return
 
             val cyan = Color.rgb(0, 178, 255)
             val violet = Color.rgb(112, 58, 255)
             val pink = Color.rgb(255, 35, 154)
             val orange = Color.rgb(255, 112, 36)
+
+            // v0.10.3: keep most everyday material in cyan/violet. Pink appears only near
+            // the top of the range and orange is now a true peak colour.
             val reactive = when {
-                energy < 0.34f -> blend(cyan, violet, energy / 0.34f)
-                energy < 0.72f -> blend(violet, pink, (energy - 0.34f) / 0.38f)
-                else -> blend(pink, orange, (energy - 0.72f) / 0.28f)
+                colorEnergy < 0.58f -> blend(cyan, violet, colorEnergy / 0.58f)
+                colorEnergy < 0.90f -> blend(violet, pink, (colorEnergy - 0.58f) / 0.32f)
+                else -> blend(pink, orange, (colorEnergy - 0.90f) / 0.10f)
             }
 
-            // The glow grows upward with volume, but never fills the whole surface as a flat colour.
-            val glowHeight = height * (0.30f + energy * 0.46f + beat * 0.08f)
+            val glowHeight = height * (0.24f + pulseEnergy * 0.42f + beat * 0.06f)
             val topY = (height - glowHeight).coerceAtLeast(0f)
-            val bottomAlpha = (54 + energy * 170 + beat * 24).toInt().coerceIn(0, 248)
-            val midAlpha = (bottomAlpha * (0.54f + energy * 0.16f)).toInt()
-            val soft = blend(reactive, Color.rgb(32, 30, 82), 0.36f)
-            val bright = blend(reactive, Color.WHITE, 0.13f + beat * 0.08f)
+            val bottomAlpha = (36 + pulseEnergy * 158 + beat * 20).toInt().coerceIn(0, 224)
+            val midAlpha = (bottomAlpha * (0.50f + pulseEnergy * 0.16f)).toInt()
+            val soft = blend(reactive, Color.rgb(24, 24, 70), 0.40f)
+            val bright = blend(reactive, Color.WHITE, 0.10f + beat * 0.06f)
 
             paint.shader = LinearGradient(
                 0f,
@@ -916,25 +921,24 @@ class TransformerImeService : InputMethodService() {
                 height.toFloat(),
                 intArrayOf(
                     Color.TRANSPARENT,
-                    withAlpha(soft, (midAlpha * 0.30f).toInt()),
+                    withAlpha(soft, (midAlpha * 0.24f).toInt()),
                     withAlpha(reactive, midAlpha),
                     withAlpha(bright, bottomAlpha)
                 ),
-                floatArrayOf(0f, 0.30f, 0.72f, 1f),
+                floatArrayOf(0f, 0.34f, 0.76f, 1f),
                 Shader.TileMode.CLAMP
             )
             canvas.drawRect(0f, topY, width.toFloat(), height.toFloat(), paint)
 
-            // A wide light source just below the keyboard makes it look illuminated from underneath.
-            val radius = width * (0.58f + energy * 0.22f + beat * 0.08f)
+            val radius = width * (0.54f + pulseEnergy * 0.20f + beat * 0.06f)
             paint.shader = RadialGradient(
                 width * 0.50f,
-                height * 1.04f,
+                height * 1.05f,
                 radius,
                 intArrayOf(
-                    withAlpha(bright, (bottomAlpha * 0.90f).toInt()),
-                    withAlpha(reactive, (bottomAlpha * 0.56f).toInt()),
-                    withAlpha(soft, (bottomAlpha * 0.18f).toInt()),
+                    withAlpha(bright, (bottomAlpha * 0.84f).toInt()),
+                    withAlpha(reactive, (bottomAlpha * 0.50f).toInt()),
+                    withAlpha(soft, (bottomAlpha * 0.14f).toInt()),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(0f, 0.30f, 0.66f, 1f),
@@ -942,16 +946,15 @@ class TransformerImeService : InputMethodService() {
             )
             canvas.drawRect(0f, topY, width.toFloat(), height.toFloat(), paint)
 
-            // Short white-hot lift on transients. It fades quickly with the beat envelope.
-            if (beat > 0.10f) {
-                val beatRadius = width * (0.34f + beat * 0.18f)
+            if (beat > 0.12f) {
+                val beatRadius = width * (0.31f + beat * 0.16f)
                 paint.shader = RadialGradient(
                     width * 0.50f,
-                    height * 1.02f,
+                    height * 1.03f,
                     beatRadius,
                     intArrayOf(
-                        withAlpha(Color.WHITE, (beat * 82f).toInt()),
-                        withAlpha(reactive, (beat * 95f).toInt()),
+                        withAlpha(Color.WHITE, (beat * 62f).toInt()),
+                        withAlpha(reactive, (beat * 78f).toInt()),
                         Color.TRANSPARENT
                     ),
                     floatArrayOf(0f, 0.46f, 1f),
@@ -976,7 +979,6 @@ class TransformerImeService : InputMethodService() {
     }
 
     companion object {
-        // Normal keys no longer carry an opaque black shade. At silence the background itself is black.
         private val KEY_BLACK = Color.TRANSPARENT
         private val GRID_LINE = Color.argb(118, 68, 68, 82)
         private val PRESSED = Color.argb(120, 82, 82, 94)
