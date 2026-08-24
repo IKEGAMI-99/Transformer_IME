@@ -84,8 +84,32 @@ class ConversionAndModelTest {
     }
 
     @Test
-    fun zenzaiUsesExactlyTenInferenceTrials() {
+    fun zenzaiKeepsTenWayExpansionAndAddsTwentyWayScoringPool() {
         assertEquals(10, Zenzai190MEngine.INFERENCE_TRIALS)
+        assertEquals(20, Zenzai190MEngine.MAX_SCORED_CANDIDATES)
+    }
+
+    @Test
+    fun conditionalLikelihoodCanOverrideCloseMozcPrior() {
+        val drafts = listOf("橋", "箸", "端", "はし")
+        val neural = listOf("箸", "橋")
+        val pool = drafts
+        val scores = listOf(-1.20f, -0.42f, -1.05f, -2.10f)
+
+        val ranked = Zenzai190MEngine.fuseConditionalScores(drafts, neural, pool, scores)
+        assertEquals("箸", ranked.first())
+        assertTrue(ranked.indexOf("橋") < ranked.indexOf("はし"))
+    }
+
+    @Test
+    fun constrainedScoringPenalizesUnsupportedNovelHallucination() {
+        val drafts = listOf("新宿駅", "新宿", "新宿液", "しんじゅくえき")
+        val neural = listOf("新宿駅前謎", "新宿駅")
+        val pool = drafts + "新宿駅前謎"
+        val scores = listOf(-0.55f, -1.1f, -1.5f, -2.5f, -0.50f)
+
+        val ranked = Zenzai190MEngine.fuseConditionalScores(drafts, neural, pool, scores)
+        assertEquals("新宿駅", ranked.first())
     }
 
     @Test
