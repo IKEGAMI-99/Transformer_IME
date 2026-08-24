@@ -129,7 +129,12 @@ bool decode_prompt(Engine & e, const std::vector<llama_token> & prompt_tokens) {
     return true;
 }
 
-std::vector<TokenScore> top_tokens(const Engine & e, float * logits, int count) {
+std::vector<TokenScore> top_tokens(
+    const Engine & e,
+    float * logits,
+    int count,
+    bool exclude_eog
+) {
     std::vector<TokenScore> top;
     if (!logits || !e.vocab || count <= 0) return top;
     const int32_t n_vocab = llama_vocab_n_tokens(e.vocab);
@@ -137,7 +142,7 @@ std::vector<TokenScore> top_tokens(const Engine & e, float * logits, int count) 
 
     for (int32_t id = 0; id < n_vocab; ++id) {
         const llama_token token = static_cast<llama_token>(id);
-        if (llama_vocab_is_eog(e.vocab, token)) continue;
+        if (exclude_eog && llama_vocab_is_eog(e.vocab, token)) continue;
         const float value = logits[id];
         if (!std::isfinite(value)) continue;
 
@@ -180,7 +185,7 @@ Generation continue_branch(
     for (int step = 1; step < max_tokens; ++step) {
         float * logits = llama_get_logits_ith(e.ctx, -1);
         if (!logits) break;
-        const auto best = top_tokens(e, logits, 2);
+        const auto best = top_tokens(e, logits, 2, false);
         if (best.empty()) break;
 
         if (best.size() > 1) {
@@ -231,7 +236,7 @@ GenerationSet multi_generate(Engine & e, const std::string & prompt, int max_tok
     }
 
     float * first_logits = llama_get_logits_ith(e.ctx, -1);
-    const auto first_choices = top_tokens(e, first_logits, std::clamp(branches, 1, 5));
+    const auto first_choices = top_tokens(e, first_logits, std::clamp(branches, 1, 5), true);
     if (first_choices.empty()) {
         llama_kv_cache_clear(e.ctx);
         return result;
