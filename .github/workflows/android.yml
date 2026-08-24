@@ -114,8 +114,8 @@ jobs:
           assert path.read_bytes()[:4] == b'GGUF'
           assert path.stat().st_size > 65_000_000
           result = {
-              'version': '0.10.6',
-              'design': 'Unicode-safe JNI bridge for llama UTF-8; InputView-reuse-safe IME; process-wide serialized Zenzai v3.2; stale-job guards; resilient raw-reading fallback; fail-safe Audio Pulse; gesture-safe insets',
+              'version': '0.10.7',
+              'design': 'Stable equal-height Japanese/QWERTY layout; katakana fixed beside AI candidate; Unicode-safe JNI; InputView-reuse-safe IME; process-wide serialized Zenzai v3.2; stale-job guards; fail-safe Audio Pulse',
               'estimated_total_parameters': 95_100_000,
               'quantization': 'Q5_K_M',
               'inference_trials': 10,
@@ -161,7 +161,7 @@ jobs:
           test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
-      - name: Verify v0.10.6 stability and JNI Unicode architecture
+      - name: Verify v0.10.7 layout, Katakana, stability and JNI Unicode architecture
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -174,12 +174,27 @@ jobs:
           jni = Path('app/src/main/cpp/zenz_jni.cpp').read_text(encoding='utf-8')
           gradle = Path('app/build.gradle').read_text(encoding='utf-8')
 
-          assert "versionName '0.10.6'" in gradle
+          assert "versionName '0.10.7'" in gradle
           assert 'INFERENCE_TRIALS = 10' in Path('app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt').read_text(encoding='utf-8')
 
-          # Crash regression from the POCO/HyperOS tombstone. llama token pieces are ordinary
-          # UTF-8 byte streams and can end mid-codepoint at max_tokens. NewStringUTF expects
-          # Modified UTF-8 and CheckJNI aborts the whole process on the malformed tail.
+          # QWERTY and Japanese use the same row geometry so mode switching does not change the
+          # keyboard body height. Insets are only applied if the bottom value really changed.
+          assert 'private fun japaneseRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 60.dp())' in ime
+          assert 'private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 60.dp())' in ime
+          assert 'container.paddingBottom != safeBottom' in ime
+          toggle = ime.split('private fun toggleMode', 1)[1].split('private fun cancelPendingRerank', 1)[0]
+          assert 'requestApplyInsets' not in toggle
+          assert 'keyboardContainer?.requestLayout()' in toggle
+
+          # AI conversion is followed by a deterministic Katakana escape candidate instead of the
+          # raw Hiragana reading. Raw reading can still remain later in the ordinary pool.
+          assert 'private fun toKatakanaReading' in ime
+          assert 'private fun forceKatakanaSecond' in ime
+          assert 'forceKatakanaSecond(stableRanked.first(), reading' in ime
+          assert 'forceKatakanaSecond(result.candidates.first(), reading' in ime
+          assert "if (ch in 'ぁ'..'ゖ') (ch.code + 0x60).toChar()" in ime
+
+          # Crash regression from the POCO/HyperOS tombstone.
           assert 'jstring utf8_to_jstring' in jni
           assert 'std::string jstring_to_utf8' in jni
           assert 'env->NewString(' in jni
@@ -188,8 +203,6 @@ jobs:
           assert '0xD800' in jni and '0xDC00' in jni
           assert 'env->NewStringUTF' not in jni
           assert 'env->GetStringUTFChars' not in jni
-          # Exact shape of the reported failure: a valid Japanese UTF-8 prefix ending in an
-          # incomplete 3-byte sequence. It must remain a permanent regression fixture.
           crash_tail = bytes.fromhex('e3 82 a2 e3 82 a4 e3 83 8e ee b8')
           try:
               crash_tail.decode('utf-8', errors='strict')
@@ -197,7 +210,7 @@ jobs:
           except UnicodeDecodeError as exc:
               assert exc.start == len(crash_tail) - 2
 
-          # InputView reuse stability from v0.10.5.
+          # InputView reuse stability.
           assert 'override fun onStartInputView' in ime
           assert 'private fun resumeInputView()' in ime
           finish = ime.split('override fun onFinishInputView', 1)[1].split('private fun resumeInputView', 1)[0]
@@ -232,7 +245,7 @@ jobs:
           assert 'getOrElse { listOf(reading) }' in ime
           assert '(rag + dictionary + reading)' in ime
 
-          # Audio Pulse is retained because the supplied native tombstone does not involve it.
+          # Audio Pulse stability remains intact.
           assert 'START_NOT_STICKY' in pulse
           assert 'AudioRecord.ERROR_DEAD_OBJECT' in pulse
           assert 'AudioRecord.ERROR_INVALID_OPERATION' in pulse
@@ -252,7 +265,7 @@ jobs:
           assert 'val glowHeight = height * (0.52f' in ime
 
           assert not Path('app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf').exists()
-          print('v0.10.6 JNI Unicode and stability source checks passed')
+          print('v0.10.7 QWERTY/Katakana/JNI source checks passed')
           PY
 
       - uses: actions/setup-java@v4
@@ -296,13 +309,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.6-Zenzai95M-x10-UnicodeSafeJNI-debug
+          name: Transformer-IME-v0.10.7-QwertyStable-KatakanaSecond-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.10.6 metadata
+      - name: Upload v0.10.7 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.6-metadata
+          name: Transformer-IME-v0.10.7-metadata
           path: |
             app/src/main/assets/zenzai95.meta.json
             app/src/main/assets/mozc_compact.meta.json
