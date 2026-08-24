@@ -8,7 +8,7 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputMethodService
+import android.inputmethodservice.InputMethodService
 import android.widget.Button
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
