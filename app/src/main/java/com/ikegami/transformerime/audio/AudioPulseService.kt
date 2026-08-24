@@ -20,6 +20,7 @@ import android.os.Looper
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.log10
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 /** Captures capturable system playback and publishes only a normalized 0..1 pulse level. */
@@ -100,19 +101,39 @@ class AudioPulseService : Service() {
             AudioFormat.CHANNEL_IN_STEREO,
             AudioFormat.ENCODING_PCM_16BIT
         ).coerceAtLeast(4096)
-        val record = AudioRecord.Builder()
-            .setAudioFormat(format)
-            .setBufferSizeInBytes(minimum * 2)
-            .setAudioPlaybackCaptureConfig(config)
-            .build()
+        val record = runCatching {
+            AudioRecord.Builder()
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(minimum * 2)
+                .setAudioPlaybackCaptureConfig(config)
+                .build()
+        }.getOrElse {
+            stopCapture(stopProjection = true)
+            stopSelf()
+            return
+        }
+
         audioRecord = record
         running = true
+        AudioPulseState.active = true
+        AudioPulseState.publish(0f)
         prefs().edit().putBoolean(KEY_ACTIVE, true).apply()
 
         executor.execute {
             val buffer = ShortArray(2048)
             var envelope = 0f
-            runCatching { record.startRecording() }
+            val started = runCatching {
+                record.startRecording()
+                record.recordingState == AudioRecord.RECORDSTATE_RECORDING
+            }.getOrDefault(false)
+            if (!started) {
+                running = false
+                AudioPulseState.reset()
+                prefs().edit().putBoolean(KEY_ACTIVE, false).apply()
+                stopSelf()
+                return@execute
+            }
+
             while (running) {
                 val read = runCatching {
                     record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
@@ -128,34 +149,35 @@ class AudioPulseService : Service() {
                 }
 
                 val rms = sqrt(sum / read).toFloat()
-
-                // v0.10.2: use a dB-based scale instead of multiplying RMS until it saturates.
-                // This preserves more dynamic range, keeps silence truly dark and reserves the
-                // orange end of the palette for genuinely loud material.
                 val rmsDb = (20.0 * log10(rms.coerceAtLeast(0.00001f).toDouble())).toFloat()
-                val rmsLevel = ((rmsDb + 52f) / 44f).coerceIn(0f, 1f)
-                val peakLevel = ((samplePeak.toFloat() - 0.025f) / 0.725f).coerceIn(0f, 1f)
-                val mixed = (rmsLevel * 0.76f + peakLevel * 0.24f).coerceIn(0f, 1f)
-                val reactive = if (mixed < 0.035f) 0f
-                else ((mixed - 0.035f) / 0.965f).coerceIn(0f, 1f)
+
+                // v0.10.3: more headroom. Typical mastered music should live mostly in
+                // cyan/violet/pink; orange is reserved for genuinely hot peaks.
+                val rmsLevel = ((rmsDb + 48f) / 45f).coerceIn(0f, 1f) // -48 dB .. -3 dB
+                val peakLevel = ((samplePeak.toFloat() - 0.04f) / 0.92f).coerceIn(0f, 1f)
+                val mixed = (rmsLevel * 0.82f + peakLevel * 0.18f).coerceIn(0f, 1f)
+                val gated = if (mixed < 0.045f) 0f
+                else ((mixed - 0.045f) / 0.955f).coerceIn(0f, 1f)
+                val reactive = gated.pow(1.45f)
 
                 envelope = if (reactive > envelope) {
-                    // Very fast attack so kicks/transients feel like a heartbeat.
-                    envelope * 0.12f + reactive * 0.88f
+                    envelope * 0.14f + reactive * 0.86f
                 } else {
-                    // Slower release gives a visible glow tail without smearing the next beat.
-                    envelope * 0.82f + reactive * 0.18f
+                    envelope * 0.84f + reactive * 0.16f
                 }
-                if (reactive == 0f && envelope < 0.012f) envelope = 0f
+                if (reactive == 0f && envelope < 0.010f) envelope = 0f
 
-                prefs().edit().putFloat(KEY_LEVEL, envelope).apply()
+                // Hot path stays in memory. v0.10.2 wrote SharedPreferences for every
+                // audio buffer, which created unnecessary I/O churn while the IME was active.
+                AudioPulseState.publish(envelope)
             }
         }
     }
 
     private fun stopCapture(stopProjection: Boolean) {
         running = false
-        prefs().edit().putFloat(KEY_LEVEL, 0f).putBoolean(KEY_ACTIVE, false).apply()
+        AudioPulseState.reset()
+        prefs().edit().putBoolean(KEY_ACTIVE, false).apply()
         runCatching { audioRecord?.stop() }
         runCatching { audioRecord?.release() }
         audioRecord = null
@@ -179,6 +201,7 @@ class AudioPulseService : Service() {
         const val PREFS = "transformer_ime"
         const val KEY_ENABLED = "audio_pulse_enabled"
         const val KEY_ACTIVE = "audio_pulse_active"
+        // Kept for compatibility with older installs; live levels no longer persist here.
         const val KEY_LEVEL = "audio_pulse_level"
         private const val SAMPLE_RATE = 44_100
         private const val CHANNEL_ID = "audio_pulse"
