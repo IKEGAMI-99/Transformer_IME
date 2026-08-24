@@ -12,9 +12,9 @@ import kotlin.math.max
  * Primary:  zenz-v3.2-small Q5_K_M (~95.1M params)
  * Fallback: zenz-v3.1-small Q5_K_M (~95.1M params)
  *
- * v0.8.1 keeps the packaged neural capacity at ~190.2M parameters, but uses top-first-token
- * branching inside the primary model to expose multiple genuinely neural conversion choices.
- * The fallback model remains a conditional second opinion instead of running on every keypress.
+ * v0.8.2 over-generates neural branches and guarantees three distinct AI-assisted slots whenever
+ * the converter has at least three useful alternatives. Invalid/duplicate neural continuations
+ * are discarded; missing slots are filled with Mozc drafts closest to the neural hypothesis.
  */
 class Zenzai190MEngine(private val context: Context) {
     data class Generation(
@@ -64,12 +64,12 @@ class Zenzai190MEngine(private val context: Context) {
     }
 
     /**
-     * Kana -> kanji conversion with three neural hypotheses.
+     * Kana -> kanji conversion with three visible AI-assisted hypotheses.
      *
-     * The primary Zenzai model branches from its top first-token choices, so the first three
-     * surfaced candidates are different neural continuations rather than one generation plus
-     * two labels copied from the classical dictionary. Mozc candidates remain immediately after
-     * them as a safety net and as useful alternatives for uncommon names and terminology.
+     * We ask the primary model for more branches than we need because early-token alternatives
+     * often collapse into the same final surface or terminate in an invalid control token. After
+     * sanitising and de-duplicating, up to three neural surfaces are kept. If fewer survive, Mozc
+     * drafts most compatible with the primary neural surface fill the remaining visible AI slots.
      */
     fun rerankConversion(
         leftContext: String,
@@ -99,11 +99,10 @@ class Zenzai190MEngine(private val context: Context) {
         val neural = (primaryTexts + fallbackTexts)
             .filter { it.isNotBlank() }
             .distinct()
-            .take(AI_CONVERSION_COUNT)
 
         if (neural.isEmpty()) {
             return RankResult(
-                candidates = drafts,
+                candidates = drafts.distinct(),
                 latencyMs = primary.latencyMs + (fallback?.latencyMs ?: 0L),
                 usedFallback = fallback != null,
                 generated = "",
@@ -111,9 +110,8 @@ class Zenzai190MEngine(private val context: Context) {
             )
         }
 
-        // Keep all three AI alternatives visible first. Classical/Mozc candidates follow and
-        // duplicates disappear, so a neural hypothesis that Mozc also knows does not waste space.
-        val ranked = (neural + drafts)
+        val aiSlots = fillAiSlots(neural, drafts, AI_CONVERSION_COUNT)
+        val ranked = (aiSlots + drafts + neural)
             .filter { it.isNotBlank() }
             .distinct()
 
@@ -165,9 +163,7 @@ class Zenzai190MEngine(private val context: Context) {
         }
 
         val neuralCandidates = LinkedHashSet<String>()
-        // Diversity pass: first surface from each predicted reading.
         expanded.forEach { list -> list.firstOrNull()?.let(neuralCandidates::add) }
-        // Then add alternative conversions without allowing one reading to dominate early slots.
         for (rank in 1 until 4) {
             expanded.forEach { list -> list.getOrNull(rank)?.let(neuralCandidates::add) }
         }
@@ -258,12 +254,12 @@ class Zenzai190MEngine(private val context: Context) {
         private const val STRONG_MARGIN = 1.35f
         private const val WEAK_MARGIN = 0.65f
         private const val AI_CONVERSION_COUNT = 3
-        private const val CONVERSION_BRANCHES = 3
-        private const val FALLBACK_BRANCHES = 2
-        private const val NEXT_PRIMARY_BRANCHES = 4
-        private const val NEXT_FALLBACK_BRANCHES = 3
+        private const val CONVERSION_BRANCHES = 5
+        private const val FALLBACK_BRANCHES = 4
+        private const val NEXT_PRIMARY_BRANCHES = 5
+        private const val NEXT_FALLBACK_BRANCHES = 4
         private const val MIN_NEXT_READINGS = 3
-        private const val MAX_NEXT_READINGS = 5
+        private const val MAX_NEXT_READINGS = 6
         private const val NEXT_MAX_TOKENS = 18
 
         internal fun sanitizeConversion(raw: String, readingLength: Int): String {
@@ -284,10 +280,38 @@ class Zenzai190MEngine(private val context: Context) {
                 .filter { it in 'ぁ'..'ゖ' || it == 'ー' }
         }
 
-        /**
-         * Retained for unit tests and backwards-compatible speculative ranking behaviour.
-         * v0.8.1's live conversion path uses three explicit neural hypotheses first.
-         */
+        internal fun fillAiSlots(
+            neural: List<String>,
+            drafts: List<String>,
+            count: Int = AI_CONVERSION_COUNT
+        ): List<String> {
+            if (count <= 0) return emptyList()
+            val result = LinkedHashSet<String>()
+            neural.filter { it.isNotBlank() }.forEach {
+                if (result.size < count) result += it
+            }
+            if (result.size >= count) return result.take(count)
+
+            val reference = neural.firstOrNull().orEmpty()
+            val indexedDrafts = drafts
+                .filter { it.isNotBlank() && it !in result }
+                .distinct()
+                .mapIndexed { index, draft -> index to draft }
+            val ordered = if (reference.isBlank()) {
+                indexedDrafts
+            } else {
+                indexedDrafts.sortedWith(
+                    compareByDescending<Pair<Int, String>> { commonPrefixLength(it.second, reference) }
+                        .thenBy { it.first }
+                )
+            }
+            ordered.forEach { (_, draft) ->
+                if (result.size < count) result += draft
+            }
+            return result.take(count)
+        }
+
+        /** Retained for unit tests and backwards-compatible speculative ranking behaviour. */
         internal fun mergeSpeculativeDrafts(
             drafts: List<String>,
             primary: String,
