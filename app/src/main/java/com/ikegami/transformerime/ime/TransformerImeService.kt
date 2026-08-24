@@ -3,21 +3,26 @@ package com.ikegami.transformerime.ime
 import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
+import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.inputmethodservice.InputMethodService
 import android.widget.Button
-import android.widget.HorizontalScrollView
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.ikegami.transformerime.conversion.CandidateGenerator
 import com.ikegami.transformerime.conversion.RomajiConverter
+import com.ikegami.transformerime.model.MediumMoETransformer
 import com.ikegami.transformerime.model.ModelRepository
 import com.ikegami.transformerime.model.TinyTransformerModel
+import java.util.concurrent.Executors
 
 class TransformerImeService : InputMethodService() {
     private val romanBuffer = StringBuilder()
@@ -28,25 +33,48 @@ class TransformerImeService : InputMethodService() {
     private var aiEnabledByUser = true
     private var model: TinyTransformerModel? = null
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val inferenceExecutor = Executors.newSingleThreadExecutor()
+    @Volatile private var mediumModel: MediumMoETransformer? = null
+    private var pendingMediumRerank: Runnable? = null
+    private var candidateEpoch = 0
+    private var currentReading = ""
+    private var currentCandidates: List<String> = emptyList()
+
     private fun Int.dp(): Int = (this * resources.displayMetrics.density).toInt()
 
     override fun onCreate() {
         super.onCreate()
         model = ModelRepository.get(this)
+        inferenceExecutor.execute {
+            mediumModel = runCatching { MediumMoETransformer.create() }.getOrNull()
+        }
+    }
+
+    override fun onDestroy() {
+        pendingMediumRerank?.let(mainHandler::removeCallbacks)
+        inferenceExecutor.shutdownNow()
+        super.onDestroy()
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
+        cancelPendingRerank()
         romanBuffer.clear()
         compositionContext = ""
+        currentReading = ""
+        currentCandidates = emptyList()
         secureField = attribute?.let(::isPasswordField) ?: false
         aiEnabledByUser = getSharedPreferences("transformer_ime", Context.MODE_PRIVATE)
             .getBoolean("ai_enabled", true)
     }
 
     override fun onFinishInput() {
+        cancelPendingRerank()
         romanBuffer.clear()
         compositionContext = ""
+        currentReading = ""
+        currentCandidates = emptyList()
         candidateRow?.removeAllViews()
         super.onFinishInput()
     }
@@ -56,6 +84,11 @@ class TransformerImeService : InputMethodService() {
             orientation = LinearLayout.VERTICAL
             setPadding(4.dp(), 4.dp(), 4.dp(), 6.dp())
             setBackgroundColor(Color.rgb(245, 245, 245))
+            setOnApplyWindowInsetsListener { view, insets ->
+                val nav = insets.getInsets(WindowInsets.Type.navigationBars())
+                view.setPadding(4.dp(), 4.dp(), 4.dp(), nav.bottom + 8.dp())
+                insets
+            }
         }
 
         val scroll = HorizontalScrollView(this).apply {
@@ -94,6 +127,7 @@ class TransformerImeService : InputMethodService() {
         bottom.addView(keyButton("⏎", 1.25f) { handleEnter() })
         root.addView(bottom, rowParams())
 
+        root.requestApplyInsets()
         postNextPredictions()
         return root
     }
@@ -149,21 +183,62 @@ class TransformerImeService : InputMethodService() {
 
     private fun refreshCompositionAndCandidates() {
         val reading = RomajiConverter.convert(romanBuffer.toString())
+        currentReading = reading
         if (reading.isEmpty()) {
+            currentCandidates = emptyList()
             currentInputConnection?.finishComposingText()
             postNextPredictions()
             return
         }
+
         currentInputConnection?.setComposingText(reading, 1)
         val base = CandidateGenerator.candidates(reading)
-        val ranked = if (aiActive()) model?.rankCandidates(compositionContext, base) ?: base else base
-        showCandidates(ranked, markFirstAsAi = aiActive() && ranked.isNotEmpty()) { commitCandidate(it) }
+        val tinyRanked = if (aiActive()) model?.rankCandidates(compositionContext, base) ?: base else base
+        currentCandidates = tinyRanked
+        showCandidates(tinyRanked, if (aiActive() && tinyRanked.isNotEmpty()) "✦" else null) { commitCandidate(it) }
+        scheduleMediumRerank(reading, tinyRanked)
+    }
+
+    private fun scheduleMediumRerank(reading: String, candidates: List<String>) {
+        cancelPendingRerank(incrementEpoch = false)
+        if (!aiActive() || secureField || candidates.size <= 1) return
+        val medium = mediumModel ?: return
+        val epoch = ++candidateEpoch
+        val contextSnapshot = compositionContext
+        val candidatesSnapshot = candidates.toList()
+
+        val runnable = Runnable {
+            if (epoch != candidateEpoch || currentReading != reading || romanBuffer.isEmpty()) return@Runnable
+            inferenceExecutor.execute {
+                val result = runCatching {
+                    medium.rerank(contextSnapshot, reading, candidatesSnapshot)
+                }.getOrNull() ?: return@execute
+
+                mainHandler.post {
+                    if (epoch != candidateEpoch || currentReading != reading || romanBuffer.isEmpty()) return@post
+                    currentCandidates = result.candidates
+                    val badge = "✦5M ${result.latencyMs}ms"
+                    showCandidates(result.candidates, badge) { commitCandidate(it) }
+                }
+            }
+        }
+        pendingMediumRerank = runnable
+        mainHandler.postDelayed(runnable, 140L)
+    }
+
+    private fun cancelPendingRerank(incrementEpoch: Boolean = true) {
+        pendingMediumRerank?.let(mainHandler::removeCallbacks)
+        pendingMediumRerank = null
+        if (incrementEpoch) candidateEpoch++
     }
 
     private fun handleBackspace() {
+        cancelPendingRerank()
         if (romanBuffer.isNotEmpty()) {
             romanBuffer.deleteCharAt(romanBuffer.lastIndex)
             if (romanBuffer.isEmpty()) {
+                currentReading = ""
+                currentCandidates = emptyList()
                 currentInputConnection?.setComposingText("", 1)
                 currentInputConnection?.finishComposingText()
                 compositionContext = ""
@@ -178,11 +253,11 @@ class TransformerImeService : InputMethodService() {
     }
 
     private fun handleSpace() {
+        cancelPendingRerank()
         if (romanBuffer.isNotEmpty()) {
             val reading = RomajiConverter.convert(romanBuffer.toString())
-            val base = CandidateGenerator.candidates(reading)
-            val ranked = if (aiActive()) model?.rankCandidates(compositionContext, base) ?: base else base
-            commitCandidate(ranked.firstOrNull() ?: reading)
+            val candidate = if (currentReading == reading) currentCandidates.firstOrNull() else null
+            commitCandidate(candidate ?: CandidateGenerator.candidates(reading).firstOrNull() ?: reading)
         } else {
             currentInputConnection?.commitText(" ", 1)
             postNextPredictions()
@@ -190,9 +265,11 @@ class TransformerImeService : InputMethodService() {
     }
 
     private fun handleEnter() {
+        cancelPendingRerank()
         if (romanBuffer.isNotEmpty()) {
             val reading = RomajiConverter.convert(romanBuffer.toString())
-            commitCandidate(CandidateGenerator.candidates(reading).firstOrNull() ?: reading)
+            val candidate = if (currentReading == reading) currentCandidates.firstOrNull() else null
+            commitCandidate(candidate ?: CandidateGenerator.candidates(reading).firstOrNull() ?: reading)
             return
         }
         currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
@@ -201,10 +278,14 @@ class TransformerImeService : InputMethodService() {
     }
 
     private fun handlePunctuation(mark: String) {
+        cancelPendingRerank()
         if (romanBuffer.isNotEmpty()) {
             val reading = RomajiConverter.convert(romanBuffer.toString())
-            currentInputConnection?.commitText(reading, 1)
+            val candidate = if (currentReading == reading) currentCandidates.firstOrNull() else null
+            currentInputConnection?.commitText(candidate ?: reading, 1)
             romanBuffer.clear()
+            currentReading = ""
+            currentCandidates = emptyList()
             compositionContext = ""
         }
         currentInputConnection?.commitText(mark, 1)
@@ -212,17 +293,23 @@ class TransformerImeService : InputMethodService() {
     }
 
     private fun commitCandidate(candidate: String) {
+        cancelPendingRerank()
         currentInputConnection?.commitText(candidate, 1)
         romanBuffer.clear()
+        currentReading = ""
+        currentCandidates = emptyList()
         compositionContext = ""
         postNextPredictions()
     }
 
     private fun toggleMode(button: Button) {
+        cancelPendingRerank()
         if (romanBuffer.isNotEmpty()) {
             val reading = RomajiConverter.convert(romanBuffer.toString())
-            currentInputConnection?.commitText(reading, 1)
+            currentInputConnection?.commitText(currentCandidates.firstOrNull() ?: reading, 1)
             romanBuffer.clear()
+            currentReading = ""
+            currentCandidates = emptyList()
             compositionContext = ""
         }
         japaneseMode = !japaneseMode
@@ -231,12 +318,13 @@ class TransformerImeService : InputMethodService() {
     }
 
     private fun postNextPredictions() {
-        if (!aiActive() || !japaneseMode) {
-            showCandidates(emptyList(), false) { }
+        if (!aiActive() || !japaneseMode || romanBuffer.isNotEmpty()) {
+            if (romanBuffer.isEmpty()) showCandidates(emptyList(), null) { }
             return
         }
         val predictions = model?.predictNext(textBeforeCursor(), 5).orEmpty().map { it.text }
-        showCandidates(predictions, markFirstAsAi = predictions.isNotEmpty()) { prediction ->
+        currentCandidates = predictions
+        showCandidates(predictions, if (predictions.isNotEmpty()) "✦" else null) { prediction ->
             currentInputConnection?.commitText(prediction, 1)
             postNextPredictions()
         }
@@ -244,21 +332,22 @@ class TransformerImeService : InputMethodService() {
 
     private fun showCandidates(
         candidates: List<String>,
-        markFirstAsAi: Boolean,
+        aiBadge: String?,
         onClick: (String) -> Unit
     ) {
         val row = candidateRow ?: return
         row.removeAllViews()
         candidates.forEachIndexed { index, candidate ->
+            val aiFirst = index == 0 && aiBadge != null
             row.addView(TextView(this).apply {
-                text = if (index == 0 && markFirstAsAi) "$candidate  ✦" else candidate
+                text = if (aiFirst) "$candidate  $aiBadge" else candidate
                 textSize = 16f
                 gravity = Gravity.CENTER
                 setTextColor(Color.rgb(25, 25, 25))
                 setPadding(15.dp(), 0, 15.dp(), 0)
                 background = GradientDrawable().apply {
                     cornerRadius = 17.dp().toFloat()
-                    setColor(if (index == 0 && markFirstAsAi) Color.rgb(230, 235, 255) else Color.WHITE)
+                    setColor(if (aiFirst) Color.rgb(230, 235, 255) else Color.WHITE)
                     setStroke(1.dp(), Color.rgb(220, 220, 220))
                 }
                 setOnClickListener { onClick(candidate) }
