@@ -6,6 +6,18 @@ Mozc OSS辞書による高速なかな漢字変換を土台に、Zenzai v3.2-sma
 
 **現在のバージョン: v0.10.0**
 
+## APKダウンロード
+
+### v0.10.0
+
+[📱 Transformer IME v0.10.0 APKをダウンロード](https://github.com/IKEGAMI-99/Transformer_IME/actions/runs/32719741487/artifacts/9517376312)
+
+GitHub Actionsでビルド・検証済みのdebug APKです。artifactはZIPとしてダウンロードされ、その中に `app-debug.apk` が入っています。GitHubへのログインが必要な場合があります。
+
+GitHub Actions artifactには保存期限があります。上のリンクが期限切れになった場合は、[最新のAndroid Build](https://github.com/IKEGAMI-99/Transformer_IME/actions/workflows/android.yml) から最新成功ビルドのAPK artifactを取得してください。
+
+---
+
 ## 特徴
 
 - Android `InputMethodService`
