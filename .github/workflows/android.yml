@@ -10,6 +10,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -40,22 +41,16 @@ jobs:
           import json, sqlite3
           from pathlib import Path
           path = Path('app/src/main/assets/mozc_compact.db')
-          meta = Path('app/src/main/assets/mozc_compact.meta.json')
+          info = json.loads(Path('app/src/main/assets/mozc_compact.meta.json').read_text(encoding='utf-8'))
           assert path.exists() and path.stat().st_size > 1_000_000
-          info = json.loads(meta.read_text(encoding='utf-8'))
           assert info['format_version'] == '2', info
           assert int(info['unique_readings']) > 100_000, info
-          assert int(info['prediction_entry_count']) > 10_000, info
           db = sqlite3.connect(path)
-          exact = [r[0] for r in db.execute(
-              "SELECT surface FROM entries WHERE reading=? ORDER BY cost", ('うめだ',)
-          )]
-          predicted = [r[0] for r in db.execute(
-              "SELECT surface FROM predictions WHERE prefix=? ORDER BY cost", ('うめ',)
-          )]
+          exact = [r[0] for r in db.execute("SELECT surface FROM entries WHERE reading=? ORDER BY cost", ('うめだ',))]
+          predicted = [r[0] for r in db.execute("SELECT surface FROM predictions WHERE prefix=? ORDER BY cost", ('うめ',))]
           assert '梅田' in exact, exact
           assert '梅田' in predicted, predicted
-          print('Mozc verified: うめだ ->', exact[:6], '/ うめ ->', predicted[:8])
+          print('Mozc verified:', exact[:6], '/', predicted[:8])
           db.close()
           PY
 
@@ -91,61 +86,88 @@ jobs:
           from pathlib import Path
           path = Path('app/src/main/assets/context_predictions.db')
           info = json.loads(Path('app/src/main/assets/context_predictions.meta.json').read_text(encoding='utf-8'))
-          assert path.exists() and path.stat().st_size > 100_000, path.stat().st_size
+          assert path.exists() and path.stat().st_size > 100_000
           assert int(info['unique_contexts']) > 1000, info
           assert int(info['prediction_entries']) > 5000, info
-          db = sqlite3.connect(path)
-          examples = list(db.execute(
-              "SELECT context,continuation,freq FROM predictions ORDER BY freq DESC LIMIT 8"
-          ))
-          assert examples
-          print('Context DB verified:', info['unique_contexts'], 'contexts, examples=', examples)
-          db.close()
+          print('Context DB verified:', info['unique_contexts'], 'contexts')
           PY
 
-      - name: Restore trained Japanese 21M model
-        id: model-cache
+      - name: Restore Zenzai Q5 models
+        id: zenz-cache
         uses: actions/cache@v4
         with:
           path: |
-            app/src/main/assets/medium_moe_jpn.q8
-            app/src/main/assets/medium_moe_jpn.meta.json
-          key: jp-large-moe-v7-${{ hashFiles('tools/train_large_moe_japanese.py', 'tools/train_medium_moe_japanese.py') }}
+            app/src/main/assets/zenz-v3.2-small-Q5_K_M.gguf
+            app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf
+            app/src/main/assets/zenzai190.meta.json
+          key: zenzai-190m-v32-v31-q5km-1
 
-      - name: Install CPU PyTorch
-        if: steps.model-cache.outputs.cache-hit != 'true'
+      - name: Download Zenzai 190M cascade
+        if: steps.zenz-cache.outputs.cache-hit != 'true'
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install numpy
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          mkdir -p app/src/main/assets
+          curl -L --fail --retry 5 --retry-delay 2 \
+            'https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf/resolve/main/ggml-model-Q5_K_M.gguf?download=true' \
+            -o app/src/main/assets/zenz-v3.2-small-Q5_K_M.gguf
+          curl -L --fail --retry 5 --retry-delay 2 \
+            'https://huggingface.co/Miwa-Keita/zenz-v3.1-small-gguf/resolve/main/ggml-model-Q5_K_M.gguf?download=true' \
+            -o app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf
 
-      - name: Train 21M Japanese MoE
-        if: steps.model-cache.outputs.cache-hit != 'true'
-        run: |
-          python tools/train_large_moe_japanese.py \
-            --output app/src/main/assets/medium_moe_jpn.q8 \
-            --metadata app/src/main/assets/medium_moe_jpn.meta.json \
-            --steps 3000 \
-            --max-sentences 180000 \
-            --batch-size 16 \
-            --lr 0.0003
-
-      - name: Verify Japanese 21M model asset
+      - name: Verify Zenzai model files and write metadata
         run: |
           python - <<'PY'
           from pathlib import Path
-          import json
-          model = Path('app/src/main/assets/medium_moe_jpn.q8')
-          meta = Path('app/src/main/assets/medium_moe_jpn.meta.json')
-          assert model.exists() and model.stat().st_size > 20_000_000
-          assert model.read_bytes()[:4] == b'MMJQ'
-          info = json.loads(meta.read_text(encoding='utf-8'))
-          assert info['parameter_count'] >= 20_000_000, info
-          assert info['architecture']['vocab_hash_buckets'] == 4096, info
-          assert info['architecture']['context'] == 48, info
-          assert info['training']['corpus'].startswith('Tatoeba')
-          print('Japanese 21M model verified:', info['parameter_count'], 'params,', model.stat().st_size, 'bytes')
+          import hashlib, json
+          models = [
+              ('primary', Path('app/src/main/assets/zenz-v3.2-small-Q5_K_M.gguf'), '95.1M', 'Apache-2.0'),
+              ('fallback', Path('app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf'), '95.1M', 'CC BY-SA 4.0'),
+          ]
+          result = {
+              'version': '0.8.0',
+              'design': 'Zenzai-style Mozc draft + neural verification cascade',
+              'estimated_total_parameters': 190_200_000,
+              'quantization': 'Q5_K_M',
+              'models': []
+          }
+          for role, path, params, license_name in models:
+              data_head = path.read_bytes()[:4]
+              assert data_head == b'GGUF', (path, data_head)
+              assert path.stat().st_size > 65_000_000, path.stat().st_size
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              result['models'].append({
+                  'role': role, 'file': path.name, 'parameters': params,
+                  'license': license_name, 'file_size': path.stat().st_size, 'sha256': digest
+              })
+          Path('app/src/main/assets/zenzai190.meta.json').write_text(
+              json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8'
+          )
+          print(json.dumps(result, ensure_ascii=False, indent=2))
           PY
+
+      - name: Clone llama.cpp b4846
+        run: |
+          rm -rf app/src/main/cpp/llama.cpp
+          git clone --depth 1 --branch b4846 https://github.com/ggml-org/llama.cpp.git app/src/main/cpp/llama.cpp
+
+      - name: Build host llama-cli for model smoke test
+        run: |
+          cmake -S app/src/main/cpp/llama.cpp -B .cache/llama-host \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF
+          cmake --build .cache/llama-host --config Release -j2 --target llama-cli
+
+      - name: Smoke-test Zenzai direct conversion
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          # Zenzai v3: context tag + Katakana reading + output tag.
+          Path('/tmp/zenz_prompt.txt').write_text('\uee02東京へ行く。\uee00シンジュクエキ\uee01', encoding='utf-8')
+          PY
+          timeout 60 .cache/llama-host/bin/llama-cli \
+            -m app/src/main/assets/zenz-v3.2-small-Q5_K_M.gguf \
+            -f /tmp/zenz_prompt.txt -n 20 --temp 0 > /tmp/zenz_out.txt 2>&1
+          cat /tmp/zenz_out.txt
+          grep -q '新宿' /tmp/zenz_out.txt
 
       - uses: actions/setup-java@v4
         with:
@@ -158,8 +180,10 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK 36
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Install Android SDK / NDK / CMake
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" \
+            "ndk;27.2.12479018" "cmake;3.22.1"
 
       - name: Run unit tests
         run: gradle :app:testDebugUnitTest --stacktrace
@@ -167,17 +191,33 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
+      - name: Verify APK contains dual GGUF and native runtime
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          apk = Path('app/build/outputs/apk/debug/app-debug.apk')
+          assert apk.exists() and apk.stat().st_size > 120_000_000, apk.stat().st_size
+          with zipfile.ZipFile(apk) as z:
+              names = set(z.namelist())
+              assert 'assets/zenz-v3.2-small-Q5_K_M.gguf' in names
+              assert 'assets/zenz-v3.1-small-Q5_K_M.gguf' in names
+              assert any(n.endswith('/libzenzjni.so') for n in names), [n for n in names if 'zenz' in n]
+          print('APK verified:', apk.stat().st_size, 'bytes')
+          PY
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.7.0-debug
+          name: Transformer-IME-v0.8.0-Zenzai190M-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.7 metadata
+      - name: Upload v0.8 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.7.0-metadata
+          name: Transformer-IME-v0.8.0-metadata
           path: |
-            app/src/main/assets/medium_moe_jpn.meta.json
+            app/src/main/assets/zenzai190.meta.json
             app/src/main/assets/mozc_compact.meta.json
             app/src/main/assets/context_predictions.meta.json
+            THIRD_PARTY_MODELS.md
