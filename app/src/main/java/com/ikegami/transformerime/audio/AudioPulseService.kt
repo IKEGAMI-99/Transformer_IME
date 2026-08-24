@@ -22,7 +22,13 @@ import kotlin.math.abs
 import kotlin.math.log10
 import kotlin.math.sqrt
 
-/** Captures capturable system playback and publishes only a normalized 0..1 pulse level. */
+/**
+ * Captures capturable system playback and publishes only a normalized 0..1 pulse level.
+ *
+ * v0.10.3 keeps the realtime level in process memory instead of writing SharedPreferences
+ * for every audio buffer. The service and IME normally live in the same app process, so this
+ * removes a large amount of needless disk / preference churn from the hot path.
+ */
 class AudioPulseService : Service() {
     private val executor = Executors.newSingleThreadExecutor()
     @Volatile private var running = false
@@ -38,6 +44,7 @@ class AudioPulseService : Service() {
             return START_NOT_STICKY
         }
         if (running) return START_STICKY
+
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
         val data = if (Build.VERSION.SDK_INT >= 33) {
             intent?.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
@@ -48,6 +55,7 @@ class AudioPulseService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+
         startForegroundPulse()
         startCapture(resultCode, data)
         return START_STICKY
@@ -73,7 +81,7 @@ class AudioPulseService : Service() {
 
     private fun startCapture(resultCode: Int, data: Intent) {
         val manager = getSystemService(MediaProjectionManager::class.java)
-        val mediaProjection = manager.getMediaProjection(resultCode, data) ?: run {
+        val mediaProjection = runCatching { manager.getMediaProjection(resultCode, data) }.getOrNull() ?: run {
             stopSelf()
             return
         }
@@ -86,33 +94,56 @@ class AudioPulseService : Service() {
             }
         }, Handler(Looper.getMainLooper()))
 
-        val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
-            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-            .addMatchingUsage(AudioAttributes.USAGE_GAME)
-            .build()
-        val format = AudioFormat.Builder()
-            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .setSampleRate(SAMPLE_RATE)
-            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
-            .build()
-        val minimum = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(4096)
-        val record = AudioRecord.Builder()
-            .setAudioFormat(format)
-            .setBufferSizeInBytes(minimum * 2)
-            .setAudioPlaybackCaptureConfig(config)
-            .build()
+        val record = runCatching {
+            val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .build()
+            val format = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+                .build()
+            val minimum = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_STEREO,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(4096)
+
+            AudioRecord.Builder()
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(minimum * 2)
+                .setAudioPlaybackCaptureConfig(config)
+                .build()
+        }.getOrNull()
+
+        if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
+            runCatching { record?.release() }
+            stopCapture(stopProjection = true)
+            stopSelf()
+            return
+        }
+
         audioRecord = record
         running = true
+        liveActive = true
+        liveLevel = 0f
         prefs().edit().putBoolean(KEY_ACTIVE, true).apply()
 
         executor.execute {
             val buffer = ShortArray(2048)
             var envelope = 0f
-            runCatching { record.startRecording() }
+
+            val started = runCatching {
+                record.startRecording()
+                record.recordingState == AudioRecord.RECORDSTATE_RECORDING
+            }.getOrDefault(false)
+            if (!started) {
+                stopCapture(stopProjection = true)
+                stopSelf()
+                return@execute
+            }
+
             while (running) {
                 val read = runCatching {
                     record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
@@ -128,37 +159,43 @@ class AudioPulseService : Service() {
                 }
 
                 val rms = sqrt(sum / read).toFloat()
-
-                // v0.10.2: use a dB-based scale instead of multiplying RMS until it saturates.
-                // This preserves more dynamic range, keeps silence truly dark and reserves the
-                // orange end of the palette for genuinely loud material.
                 val rmsDb = (20.0 * log10(rms.coerceAtLeast(0.00001f).toDouble())).toFloat()
-                val rmsLevel = ((rmsDb + 52f) / 44f).coerceIn(0f, 1f)
-                val peakLevel = ((samplePeak.toFloat() - 0.025f) / 0.725f).coerceIn(0f, 1f)
-                val mixed = (rmsLevel * 0.76f + peakLevel * 0.24f).coerceIn(0f, 1f)
-                val reactive = if (mixed < 0.035f) 0f
-                else ((mixed - 0.035f) / 0.965f).coerceIn(0f, 1f)
+
+                // v0.10.3: preserve considerably more headroom. Normal mastered music should
+                // mostly live in blue/violet; pink/orange is reserved for genuinely loud peaks.
+                // Squaring the normalized RMS gives us a gentle perceptual-style compression of
+                // the midrange without losing the quiet-end response.
+                val rmsLinear = ((rmsDb + 56f) / 56f).coerceIn(0f, 1f)
+                val rmsLevel = rmsLinear * rmsLinear
+                val peakLevel = ((samplePeak.toFloat() - 0.04f) / 0.94f).coerceIn(0f, 1f)
+                val mixed = (rmsLevel * 0.82f + peakLevel * 0.18f).coerceIn(0f, 1f)
+                val reactive = if (mixed < 0.028f) 0f
+                else ((mixed - 0.028f) / 0.972f).coerceIn(0f, 1f)
 
                 envelope = if (reactive > envelope) {
-                    // Very fast attack so kicks/transients feel like a heartbeat.
-                    envelope * 0.12f + reactive * 0.88f
+                    envelope * 0.16f + reactive * 0.84f
                 } else {
-                    // Slower release gives a visible glow tail without smearing the next beat.
-                    envelope * 0.82f + reactive * 0.18f
+                    envelope * 0.84f + reactive * 0.16f
                 }
-                if (reactive == 0f && envelope < 0.012f) envelope = 0f
+                if (reactive == 0f && envelope < 0.010f) envelope = 0f
 
-                prefs().edit().putFloat(KEY_LEVEL, envelope).apply()
+                // Hot path: one volatile assignment, no SharedPreferences I/O.
+                liveLevel = envelope
             }
         }
     }
 
     private fun stopCapture(stopProjection: Boolean) {
         running = false
-        prefs().edit().putFloat(KEY_LEVEL, 0f).putBoolean(KEY_ACTIVE, false).apply()
-        runCatching { audioRecord?.stop() }
-        runCatching { audioRecord?.release() }
+        liveLevel = 0f
+        liveActive = false
+        prefs().edit().putBoolean(KEY_ACTIVE, false).apply()
+
+        val record = audioRecord
         audioRecord = null
+        runCatching { record?.stop() }
+        runCatching { record?.release() }
+
         val activeProjection = projection
         projection = null
         if (stopProjection) runCatching { activeProjection?.stop() }
@@ -179,7 +216,14 @@ class AudioPulseService : Service() {
         const val PREFS = "transformer_ime"
         const val KEY_ENABLED = "audio_pulse_enabled"
         const val KEY_ACTIVE = "audio_pulse_active"
+        // Kept for compatibility with older installs. Realtime levels no longer use preferences.
         const val KEY_LEVEL = "audio_pulse_level"
+
+        @Volatile var liveLevel: Float = 0f
+            private set
+        @Volatile var liveActive: Boolean = false
+            private set
+
         private const val SAMPLE_RATE = 44_100
         private const val CHANNEL_ID = "audio_pulse"
         private const val NOTIFICATION_ID = 4401
