@@ -10,3 +10,5 @@ app/src/main/assets/medium_moe_jpn.q8
 app/src/main/assets/medium_moe_jpn.meta.json
 app/src/main/assets/mozc_compact.db
 app/src/main/assets/mozc_compact.meta.json
+app/src/main/assets/context_predictions.db
+app/src/main/assets/context_predictions.meta.json
