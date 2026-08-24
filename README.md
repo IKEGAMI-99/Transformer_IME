@@ -2,21 +2,19 @@
 
 Android向けの、**完全オンデバイスAI日本語IME**実験プロジェクトです。
 
-Mozc OSS辞書による高速かな漢字変換を土台に、Zenzai v3.2-smallによるニューラル変換・文脈予測、端末内SQLiteを使ったPersonal RAG / 個人学習、英語入力予測、Audio Pulse UIを組み合わせています。
+Mozc OSS辞書によるかな漢字変換を土台に、Zenzai v3.2-smallによるニューラル変換・文脈予測、端末内SQLiteを使ったPersonal RAG / 個人学習、英語入力予測、Audio Pulse UIを組み合わせています。
 
-**現在のバージョン: v0.10.4**
+**現在のバージョン: v0.10.6**
 
 ## APKダウンロード
 
-### v0.10.4
+### v0.10.6
 
-[📱 Transformer IME v0.10.4 APKをダウンロード](https://github.com/IKEGAMI-99/Transformer_IME/actions/runs/32732549820/artifacts/9522054849)
+[📱 Transformer IME v0.10.6 APKをダウンロード](https://github.com/IKEGAMI-99/Transformer_IME/actions/runs/32783357521/artifacts/9540648851)
 
-GitHub ActionsでZenzai実変換、source verification、unit test、Android NDK、APK生成まで検証済みのdebug APKです。
+GitHub Actions artifactはZIPで、その中に `app-debug.apk` が入っています。GitHubへのログインが必要な場合があります。
 
-artifactはZIPとしてダウンロードされ、その中に `app-debug.apk` が入っています。GitHubへのログインが必要な場合があります。
-
-GitHub Actions artifactには保存期限があります。期限切れの場合は [最新のAndroid Build](https://github.com/IKEGAMI-99/Transformer_IME/actions/workflows/android.yml) から最新成功ビルドを取得してください。
+artifactには保存期限があります。期限切れの場合は [最新のAndroid Build](https://github.com/IKEGAMI-99/Transformer_IME/actions/workflows/android.yml) から最新成功ビルドを取得してください。
 
 ---
 
@@ -28,164 +26,149 @@ GitHub Actions artifactには保存期限があります。期限切れの場合
 - Mozc OSS由来SQLite辞書 + 読み途中の前方一致予測
 - **Zenzai v3.2-small 約95.1M parameters / Q5_K_M**
 - **1入力につき最大10-wayニューラル推論**
-- AI変換第1候補 + 元の読みを第2候補に固定
+- AI第1候補 + 元の読みを第2候補に固定
 - 確定後の文脈予測
 - **Personal RAG / 個人学習**
 - 学習内容の閲覧・全削除
 - 絵文字パネル + 最近使った絵文字
 - `123` → 4×4数字キーパッド
 - Backspace長押し連続削除
-- 日本語の `変換` キーを **空白** キーへ変更
+- 日本語の旧 `変換` キーは **空白** キー
 - Enterは候補未選択なら**ひらがなのまま確定**
 - 修飾キーは **中央=小文字切替 / 左=濁点 / 右=半濁点**
-- 変換候補タップ時、IME上部を `候補 wwww` がニコニコ動画風に流れる
-- **Audio Pulse**: 無音時は黒、下端から連続グラデーションで発光
-- 通常キー面は透明で背景グローを直接表示
+- 候補タップ時、IME上部を `候補 wwww` がニコニコ動画風に流れる
+- **Audio Pulse**: 無音時は黒、下端から音量連動グラデーション
 - パスワード欄ではAI・個人学習・コメント演出を停止
 - `INTERNET` permissionなし
 - 推論・学習・変換は端末内で完結
 
 ---
 
-## v0.10.4: 安定性改善
+## v0.10.6: JNI Unicode crash fix
 
-v0.10.4では、IMEの途中終了につながる可能性があったZenzai native runtimeのライフサイクルを見直しました。
+v0.10.6では、実機で確認されたnative crashを修正しました。
 
-従来は `InputMethodService` が破棄される際、別スレッドでllama.cpp推論が継続中でもモデルをcloseできる構造でした。
-
-現在はZenzai 95Mを**Androidプロセス内で共有する1インスタンス**として保持します。
+Android tombstone:
 
 ```text
-Android process
-   ↓
-shared Zenzai 95M runtime
-   ├ IME input view A
-   ├ IME input view B
-   └ async inference
+JNI DETECTED ERROR IN APPLICATION:
+input is not valid Modified UTF-8
+in call to NewStringUTF
+from ZenzaiNative.nativeGenerateCandidates(...)
 ```
 
-IME Viewを閉じた際はPulse更新、コメントアニメーション、View参照を解除しますが、実行中のnative inferenceを途中で破棄しません。
+### 原因
 
-executorへの投入もライフサイクル状態を確認してから行い、shutdown後に新しい推論を送らない構成です。
+llama.cppのtoken pieceは**標準UTF-8のbyte stream**です。
 
-この変更はクラッシュ原因として疑わしい競合を除去するものですが、実機上での完全な安定性は継続検証中です。
+生成が `max_tokens` 境界で止まると、まれに1文字の途中で終了できます。
+
+例:
+
+```text
+正常なUTF-8 ... E3 82 A2
+途中切れ   ... EE B8
+```
+
+一方、JNIの `NewStringUTF` は標準UTF-8ではなく **Modified UTF-8** を要求します。
+
+不完全なbyte列を `NewStringUTF` に渡すと、Android CheckJNIはJava例外ではなく**プロセスabort**を発生させる場合があります。
+
+### v0.10.6の修正
+
+JNI境界を明示的なUnicode変換へ変更しました。
+
+```text
+llama.cpp
+standard UTF-8 bytes
+      ↓
+UTF-8 validator / decoder
+      ↓
+UTF-16
+      ↓
+JNI NewString
+      ↓
+Kotlin String
+```
+
+- `NewStringUTF` によるモデル出力変換を廃止
+- `GetStringUTFChars` によるprompt変換も廃止
+- standard UTF-8 → UTF-16 → `NewString`
+- Java UTF-16 → standard UTF-8 を明示変換
+- 末尾の不完全なUTF-8 code pointは安全に破棄
+- 内部の不正byteはU+FFFDへ置換
+- surrogate pairを処理するため絵文字など補助平面文字を含む文脈にも対応
+
+CIでは、報告されたクラッシュと同型の `... EE B8` 不完全UTF-8を回帰fixtureとして保持しています。
+
+また `zenz_jni.cpp` で実際の `env->NewStringUTF` / `env->GetStringUTFChars` 呼び出しが復活した場合、CIを失敗させます。
 
 ---
 
-## 日本語入力の操作
+## v0.10.5: IME lifecycle stability
+
+v0.10.5では、候補欄やAudio Pulseが途中から反応しなくなる問題を修正しました。
+
+Androidは `InputMethodService` のInputViewを再利用することがあります。
+
+従来は `onFinishInputView()` で以下のView参照を破棄していたため、見た目のキーボードだけ再利用され、内部接続が切れるケースがありました。
+
+- candidate row
+- keyboard container
+- Audio Pulse background
+- comment overlay
+
+現在はViewを非表示にした際は更新だけ停止し、Service自体が破棄されるまで再利用可能な参照を保持します。
+
+さらに:
+
+- Zenzai native runtimeをprocess-wide共有
+- 全IME Serviceからのnative inferenceを直列化
+- 古い入力のqueued inferenceをepochで破棄
+- Mozc / RAG一時エラー時も生のひらがな候補を維持
+- AudioRecord異常終了を安全処理
+- navigation / system gesture / mandatory gesture Insetsを統合
+
+しています。
+
+---
+
+## 日本語入力
 
 ### Enter
 
-変換候補をタップしていない状態でEnterを押した場合、候補1位を自動採用しません。
+入力中にEnterを押した場合、候補1位を自動採用しません。
 
 ```text
 きょうは
-   ↓ Enter
+  ↓ Enter
 きょうは
 ```
 
-ひらがなのまま確定します。
+漢字変換したい場合は候補バーを直接タップします。
 
-漢字へ変換したい場合は候補バーから候補を直接選択します。
+### 空白
 
-### 空白キー
+旧 `変換` キーは `空白` です。
 
-旧 `変換` キーは `空白` に変更しました。
+入力中のひらがながある場合は、その読みをそのまま確定した後に空白を入力します。
 
-入力中のひらがながある場合は、そのひらがなをそのまま確定してからスペースを入力します。
-
-### 濁点 / 半濁点 / 小文字
-
-修飾キー:
+### 小文字 / 濁点 / 半濁点
 
 ```text
-        小文字切替
-            ↑
-濁点  ←  ゛ 小 ゜  →  半濁点
+        小文字
+          ↑
+濁点 ← ゛ 小 ゜ → 半濁点
 ```
 
-中央タップは従来の小文字優先サイクルを維持します。
+中央タップは小文字優先サイクルです。
 
 ```text
 つ → っ → づ
 う → ぅ → ゔ
 ```
 
-左フリックでは直接濁点、右フリックでは直接半濁点を適用します。
-
-```text
-か + 左 → が
-は + 左 → ば
-は + 右 → ぱ
-ば + 右 → ぱ
-```
-
----
-
-## NicoNico-style candidate comment
-
-日本語・次候補などの候補バーをタップすると、IME上部を選択語が右から左へ流れます。
-
-```text
-新宿駅 wwww   → → →
-```
-
-- 右から左へ約3.4秒で移動
-- 白文字 + 黒シャドウ
-- 2レーン
-- `SYSTEM_ALERT_WINDOW` 不使用
-- IMEウィンドウ内だけで表示
-- パスワード欄では停止
-
-システムオーバーレイ権限を使わないため、他アプリのWindowへ直接描画しません。
-
----
-
-## Bottom Glow Audio Pulse
-
-Audio PulseはAndroidの `AudioPlaybackCapture` で取得可能なシステム再生音を解析します。
-
-```text
-システム再生音
-      ↓
-AudioPlaybackCapture
-      ↓
-RMS + instantaneous peak
-      ↓
-AudioPulseState
-      ↓
-fast attack / slow decay
-      ↓
-Bottom-up gradient
-```
-
-### v0.10.4の描画
-
-グラデーションの途中に横方向の切れ目が見えにくいよう、上方向のフェザーを長くし、5段階のLinearGradientに変更しました。
-
-```text
-上側    ほぼ透明
-        ↓
-        薄い色
-        ↓
-        中間色
-        ↓
-        強い色
-下端    最も明るい光源
-```
-
-下中央のRadialGradientも重ねています。
-
-無音時は黒です。通常音量は青〜紫中心で、ピンク〜オレンジは大きなピーク側に寄せています。
-
-### 下部システムUI
-
-IME下端はnavigation barとの重なりを避けつつ、大きな黒余白にならないよう調整しています。
-
-- minimum safe inset: 18dp
-- navigation bar insetを使用
-- 一部OEMで異常に大きい値が返る場合は最大30dpへ制限
-- navigation bar背景は黒
+左フリックは直接濁点、右フリックは直接半濁点です。
 
 ---
 
@@ -199,86 +182,93 @@ IME下端はnavigation barとの重なりを避けつつ、大きな黒余白に
 - Q5_K_M
 - Apache-2.0
 
-Zenzaiは1モデルだけ搭載し、同一入力に対して最大10分岐を試します。
+同一入力に対して最大10分岐を生成し、Mozc候補・Personal RAG候補と統合します。
 
 ```text
 左文脈 + 読み
       ↓
-Mozc candidate pool
+Mozc / Personal RAG candidates
       ↓
-Zenzai 95M × 10 trials
+Zenzai 95M ×10
       ↓
-AI第1候補
+AI候補
       ↓
 元の読み
       ↓
 通常候補
 ```
 
-候補バーでは `✦Z95×10` 系の表示でZenzai推論結果を識別できます。
-
 ---
 
 ## Personal RAG / 個人学習
 
-ユーザーが実際に使った変換や文脈続きを端末内SQLiteへ記録します。
-
-保存する情報:
+端末内SQLiteへ以下を保存します。
 
 - `conversion`: 読み → 選択した変換
-- `next`: 文脈 → 選択した次候補
-- `memory`: 普通に確定した文章の続きをRAG記憶として保存
-- `english`: prefix → 選択した英単語
+- `next`: 文脈 → 次候補
+- `memory`: 確定文章の文脈記憶
+- `english`: prefix → 英単語
 - `english_next`: 英文脈 → 次単語
 
+頻度と最終使用時刻を使って候補順位を調整します。
+
+アプリ本体の `学習内容を表示` から確認でき、`学習内容をすべて削除` でリセットできます。
+
+---
+
+## Audio Pulse
+
+Android `AudioPlaybackCapture` で取得可能なシステム再生音を解析します。
+
 ```text
-現在の読み / 文脈
+system playback
       ↓
-Personal RAG
+RMS + peak
       ↓
-過去によく使った候補
+AudioPulseState
       ↓
-Mozc / context DB候補と統合
+fast attack / slow decay
       ↓
-Zenzai rerank
+bottom glow
 ```
 
-頻度と最終使用時刻を使って順位を調整します。
+- 無音時は黒
+- 小〜中音量は青 / 紫中心
+- 大きなピークはピンク / オレンジ
+- 音声そのものは保存しない
+- live levelはprocess-local memoryで共有
+- MediaProjection / AudioRecord停止時は安全終了
 
-アプリ本体の `学習内容を表示` から内容・回数・最終使用時刻を確認できます。`学習内容をすべて削除` でローカル学習DBをリセットできます。
-
----
-
-## 英語QWERTY
-
-英語モードでも候補バーを利用できます。
-
-- prefix補完
-- 単語候補
-- 次単語予測
-- 英語個人学習
-- 英語Personal RAG
-- Shift
-- Backspace長押し連続削除
-
-外部APIは使用しません。
+v0.10.6のクラッシュログではAudio Pulseのstack frameはなく、原因はZenzai JNIでした。そのためAudio Pulseは維持しています。
 
 ---
 
-## プライバシー / セキュリティ
+## NicoNico-style candidate comment
+
+候補をタップするとIME上部を右から左へ流れます。
+
+```text
+新宿駅 wwww  → → →
+```
+
+- IME Window内のみ
+- `SYSTEM_ALERT_WINDOW` 不使用
+- パスワード欄では停止
+
+---
+
+## プライバシー
 
 - `INTERNET` permissionなし
 - 入力内容の外部送信なし
 - ZenzaiモデルはAPKへ同梱
 - Mozc辞書 / context DBもAPKへ同梱
-- 個人学習DBは端末内SQLiteのみ
+- 個人学習DBは端末内SQLite
 - `android:allowBackup="false"`
-- パスワード欄ではAI候補生成停止
-- パスワード欄では個人学習停止
+- パスワード欄ではAI・学習停止
 - Audio Pulseの音声データは保存しない
-- NicoコメントはIME Window内だけで描画
 
-Audio Pulse用権限:
+Audio Pulseのみ以下のAndroid権限を使用します。
 
 - `RECORD_AUDIO`
 - `FOREGROUND_SERVICE`
@@ -293,94 +283,76 @@ Audio Pulse用権限:
 - ABI: **arm64-v8a**
 - Java: **17**
 - NDK: **27.2.12479018**
-- GGUF Q5_K_M
-- JNI native runtime: `libzenzjni.so`
-- azooKey Zenzai tokenizer対応 `llama.cpp b4846`
+- JNI: `libzenzjni.so`
+- Zenzai: Q5_K_M GGUF
+- tokenizer/runtime: azooKey `llama.cpp b4846`
 
 ---
 
-## GitHub Actions
+## CI
 
-CIでは以下を自動検証します。
+GitHub Actionsでは以下を自動検証します。
 
-1. Mozc辞書 / prefix予測
+1. Mozc exact / prefix prediction
 2. 日本語context prediction DB
-3. Zenzai v3.2-small GGUF
+3. Zenzai v3.2 GGUF検証
 4. azooKey llama.cpp host build
 5. Zenzai実かな漢字変換 smoke test
-6. Zenzai 95M ×10
-7. process-wide Zenzai runtime
-8. IME lifecycle / executor guard
-9. raw Enter
-10. 日本語空白キー
-11. 左濁点 / 右半濁点
-12. NicoNico-style candidate comment
-13. Bottom Glow 5-stop gradient
-14. navigation inset制御
-15. Kotlin unit tests
-16. Android NDK / arm64 build
-17. APK内の単一GGUF + `libzenzjni.so`
-18. APK artifact upload
+6. v0.10.6 Unicode-safe JNI source regression
+7. 報告済み不完全UTF-8 crash fixture
+8. InputView reuse lifecycle
+9. process-wide serialized Zenzai runtime
+10. stale inference guard
+11. candidate fallback
+12. Audio Pulse failure handling
+13. HyperOS / gesture Insets
+14. Kotlin unit tests
+15. Android NDK arm64 build
+16. APK内GGUF + `libzenzjni.so`確認
+17. APK artifact upload
 
 ---
 
 ## バージョン履歴
 
+### v0.10.6
+
+- Zenzai JNIのinvalid Modified UTF-8 abortを修正
+- standard UTF-8 ↔ UTF-16 bridgeを実装
+- `NewStringUTF` / `GetStringUTFChars`依存を廃止
+- 不完全な生成末尾を安全処理
+- emoji / supplementary Unicode context対応を改善
+- 実機クラッシュbyte列をCI regression fixtureへ追加
+
+### v0.10.5
+
+- InputView再利用時の候補 / Audio Pulse切断を修正
+- native inferenceをprocess-wide直列化
+- stale推論破棄
+- raw hiragana fallback
+- AudioRecord / MediaProjection failure handling
+- gesture-safe bottom Insets
+
 ### v0.10.4
 
-- Zenzai runtimeをprocess-wide共有へ変更
-- native inferenceとIME teardownのclose競合を回避
-- InputView終了時のPulse / animation / View参照を解放
 - `変換` → `空白`
 - Enterでひらがなのまま確定
-- 修飾キー: 中央=小文字 / 左=濁点 / 右=半濁点
-- 候補選択時に `候補 wwww` コメント演出
-- Bottom Glowの上方向フェザーを拡張
-- 下部navigation UIとの重なりを調整
-
-### v0.10.3
-
-- Audio Pulse peak headroom改善
-- Process-local `AudioPulseState`
-- Audio Pulse hot pathからSharedPreferences I/Oを削除
-- AudioRecord失敗時の安全停止
-- Pulse pollingを25fpsへ軽量化
-
-### v0.10.2
-
-- 無音時を黒へ
-- 通常キー面を透明化
-- 下端光源のLinearGradient + RadialGradient
-
-### v0.10.1
-
-- 数字ファンを廃止
-- `123` → 4×4数字キーパッド
-- Audio Pulseをキー領域限定へ変更
+- 左濁点 / 右半濁点
+- NicoNico-style candidate comment
+- Bottom Glow改善
 
 ### v0.10.0
 
 - Personal RAG
-- 日本語 / 英語個人学習
-- 学習内容ビューア
-- 英語QWERTY候補
-- Audio Pulse初版
-- 絵文字パネル
-- Backspace長押し連続削除
-
-### v0.9.x
-
-- Zenzai v3.2-small単一モデル化
-- 95.1M parameters
-- 10-wayニューラル推論
-
-### v0.8.x
-
-- Zenzaiかな漢字変換導入
-- ニューラル文脈予測
+- 英語候補
+- Audio Pulse
+- emoji / numeric panel
+- Backspace連続削除
 
 ---
 
-## Third-party models / licenses
+## License
 
-第三者モデル・コンポーネントの詳細とライセンスは [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) を参照してください。
+アプリ本体コードのライセンスはリポジトリ内のライセンス表記を参照してください。
+
+Zenzaiモデル等の第三者コンポーネントについては `THIRD_PARTY_MODELS.md` を参照してください。
