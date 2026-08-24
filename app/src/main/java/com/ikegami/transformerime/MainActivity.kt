@@ -38,7 +38,7 @@ class MainActivity : Activity() {
 
         root.addView(TextView(this).apply { text = "Transformer IME"; textSize = 30f })
         root.addView(TextView(this).apply {
-            text = "v0.10.4 · Zenzai 95M ×10 + Personal RAG + Stable Pulse UX"
+            text = "v0.10.5 · Zenzai 95M ×10 + Lifecycle Stability"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 22.dp())
         })
@@ -75,7 +75,7 @@ class MainActivity : Activity() {
         root.addView(audioSwitch, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 64.dp()))
 
         root.addView(TextView(this).apply {
-            text = "Audio Pulseはシステム再生音のRMSと瞬間ピークだけを解析します。無音時は黒、発光は下端から連続グラデーションで立ち上がります。v0.10.4ではIME表示中のnative推論ライフサイクルも見直し、Zenzaiをプロセス共有化しています。"
+            text = "Audio Pulseはシステム再生音のRMSと瞬間ピークだけを解析します。v0.10.5ではIMEのView再利用時にもPulseと候補表示を確実に再接続し、MediaProjection / AudioRecordが停止した場合は死んだON状態を残さず安全に終了します。"
             textSize = 13f
             setPadding(0, 0, 0, 16.dp())
         })
@@ -97,21 +97,29 @@ class MainActivity : Activity() {
         }, fullButton(8))
 
         root.addView(TextView(this).apply {
-            text = "v0.10.4 構成\n" +
+            text = "v0.10.5 構成\n" +
                 "・Zenzai v3.2-small Q5_K_M 約95.1M / 10試行\n" +
-                "・Zenzai runtimeをプロセス共有しnative close競合を回避\n" +
-                "・Personal RAG + Mozc OSS辞書 + 英語予測\n" +
+                "・Zenzai runtimeをプロセス共有 + native推論を全IMEインスタンス間で直列化\n" +
+                "・InputView再利用時に候補バー / Audio Pulse / Insetsを必ず再開\n" +
+                "・古いZenzai推論を実行直前のepoch検査で破棄\n" +
+                "・Mozc / RAG例外時も生のひらがな候補を必ず維持\n" +
+                "・AudioRecord / MediaProjection停止を検出して安全に終了\n" +
+                "・ナビゲーション + ジェスチャーInsetを統合し下部30〜56dpを確保\n" +
                 "・日本語Enter: 候補未選択ならひらがなのまま確定\n" +
-                "・変換キーを空白キーへ変更\n" +
-                "・修飾キー: 中央=小文字切替 / 左=濁点 / 右=半濁点\n" +
-                "・候補タップ: IME上部を『候補 wwww』が横切る\n" +
-                "・Audio Pulse: 連続Bottom Glow / ナビゲーション余白調整"
+                "・空白キー / 左濁点 / 右半濁点 / ニコニコ風コメントを維持"
             textSize = 14f
             setPadding(0, 20.dp(), 0, 0)
             setLineSpacing(0f, 1.15f)
         })
 
         setContentView(scroll)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::audioSwitch.isInitialized) {
+            setAudioSwitchWithoutCallback(prefs.getBoolean(AudioPulseService.KEY_ENABLED, false))
+        }
     }
 
     private fun fullButton(top: Int) = LinearLayout.LayoutParams(
