@@ -71,7 +71,10 @@ class AudioPulseService : Service() {
 
     private fun startCapture(resultCode: Int, data: Intent) {
         val manager = getSystemService(MediaProjectionManager::class.java)
-        val mediaProjection = manager.getMediaProjection(resultCode, data)
+        val mediaProjection = manager.getMediaProjection(resultCode, data) ?: run {
+            stopSelf()
+            return
+        }
         projection = mediaProjection
         mediaProjection.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
