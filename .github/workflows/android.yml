@@ -118,13 +118,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.4.0-debug
+          name: Transformer-IME-v0.5.0-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.4 metadata
+      - name: Upload v0.5 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.4.0-metadata
+          name: Transformer-IME-v0.5.0-metadata
           path: |
             app/src/main/assets/medium_moe_jpn.meta.json
             app/src/main/assets/mozc_compact.meta.json
