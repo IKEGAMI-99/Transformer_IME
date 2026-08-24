@@ -47,7 +47,7 @@ class TransformerImeService : InputMethodService() {
         super.onCreate()
         model = ModelRepository.get(this)
         inferenceExecutor.execute {
-            mediumModel = runCatching { MediumMoETransformer.create() }.getOrNull()
+            mediumModel = runCatching { MediumMoETransformer.load(this) }.getOrNull()
         }
     }
 
@@ -80,13 +80,26 @@ class TransformerImeService : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
+        val side = 4.dp()
+        val top = 4.dp()
+        val minimumBottomSafe = 44.dp()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(4.dp(), 4.dp(), 4.dp(), 6.dp())
+            setPadding(side, top, side, minimumBottomSafe)
             setBackgroundColor(Color.rgb(245, 245, 245))
             setOnApplyWindowInsetsListener { view, insets ->
                 val nav = insets.getInsets(WindowInsets.Type.navigationBars())
-                view.setPadding(4.dp(), 4.dp(), 4.dp(), nav.bottom + 8.dp())
+                val gestures = insets.getInsets(WindowInsets.Type.systemGestures())
+                val mandatory = insets.getInsets(WindowInsets.Type.mandatorySystemGestures())
+                val tappable = insets.getInsets(WindowInsets.Type.tappableElement())
+                val reportedBottom = maxOf(
+                    nav.bottom,
+                    gestures.bottom,
+                    mandatory.bottom,
+                    tappable.bottom
+                )
+                val safeBottom = maxOf(minimumBottomSafe, reportedBottom + 8.dp())
+                view.setPadding(side, top, side, safeBottom)
                 insets
             }
         }
@@ -217,7 +230,8 @@ class TransformerImeService : InputMethodService() {
                 mainHandler.post {
                     if (epoch != candidateEpoch || currentReading != reading || romanBuffer.isEmpty()) return@post
                     currentCandidates = result.candidates
-                    val badge = "✦5M ${result.latencyMs}ms"
+                    val modelTag = if (medium.corpusTrained) "✦JP5M" else "✦5M"
+                    val badge = "$modelTag ${result.latencyMs}ms"
                     showCandidates(result.candidates, badge) { commitCandidate(it) }
                 }
             }
