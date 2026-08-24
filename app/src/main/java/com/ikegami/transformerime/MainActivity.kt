@@ -38,7 +38,7 @@ class MainActivity : Activity() {
 
         root.addView(TextView(this).apply { text = "Transformer IME"; textSize = 30f })
         root.addView(TextView(this).apply {
-            text = "v0.10.7 · QWERTY stability + Katakana second"
+            text = "v0.11.0 · Zenzai constrained precision reranker"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 22.dp())
         })
@@ -75,7 +75,7 @@ class MainActivity : Activity() {
         root.addView(audioSwitch, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 64.dp()))
 
         root.addView(TextView(this).apply {
-            text = "v0.10.7ではQWERTYと日本語フリックの行高を統一し、モード切替時の不要なInset再適用を削減しました。AI変換候補の右隣は、ひらがな原文ではなくカタカナ表記を固定表示します。v0.10.6のUnicode-safe JNI安定化はそのまま維持しています。"
+            text = "v0.11ではZenzaiの自由生成1位をそのまま採用せず、Mozc・RAG・個人学習候補と10-way生成候補を最大20件にまとめ、Zenzai自身が各候補の条件付き尤度を採点して最終順位を決めます。v0.10.6以降のUnicode-safe JNIと安定化処理は維持しています。"
             textSize = 13f
             setPadding(0, 0, 0, 16.dp())
         })
@@ -97,15 +97,15 @@ class MainActivity : Activity() {
         }, fullButton(8))
 
         root.addView(TextView(this).apply {
-            text = "v0.10.7 構成\n" +
-                "・Zenzai v3.2-small Q5_K_M 約95.1M / 10試行\n" +
+            text = "v0.11.0 構成\n" +
+                "・Zenzai v3.2-small Q5_K_M 約95.1M\n" +
+                "・10-way生成 + 最大20候補の条件付き尤度スコアリング\n" +
+                "・Mozc / Personal RAG / 個人学習順位をpriorとして融合\n" +
                 "・AI第1候補 → カタカナ → 通常候補\n" +
-                "・QWERTY / 日本語フリックを4行×60dpへ統一\n" +
-                "・QWERTY切替時の不要なrequestApplyInsetsを削除\n" +
-                "・bottom insetが変化した時だけレイアウト更新\n" +
+                "・左下モード切替 / 右下Enterの特別背景を廃止\n" +
+                "・QWERTY / 日本語フリックは4行×60dp固定\n" +
                 "・Unicode-safe JNI / native推論直列化 / stale推論破棄を維持\n" +
-                "・InputView再利用 / 候補フォールバック / Audio Pulse安定化を維持\n" +
-                "・日本語Enter / 空白キー / 濁点フリック / ニコニコ風コメントを維持"
+                "・InputView再利用 / 候補フォールバック / Audio Pulse安定化を維持"
             textSize = 14f
             setPadding(0, 20.dp(), 0, 0)
             setLineSpacing(0f, 1.15f)
