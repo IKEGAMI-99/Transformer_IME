@@ -161,7 +161,11 @@ class TransformerImeService : InputMethodService() {
         pulseBackground = AudioPulseBackgroundView(this)
         keyboardHost.addView(
             pulseBackground,
-            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                320.dp(),
+                Gravity.BOTTOM
+            )
         )
 
         keyboardContainer = LinearLayout(this).apply {
@@ -317,9 +321,9 @@ class TransformerImeService : InputMethodService() {
         minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
         setPadding(0, 0, 0, 0)
         background = GradientDrawable().apply {
-            setColor(if (accent) ACCENT else Color.argb(215, 14, 14, 18))
+            setColor(if (accent) ACCENT else Color.argb(18, 0, 0, 0))
             cornerRadius = 12.dp().toFloat()
-            setStroke(1.dp(), Color.argb(160, 70, 70, 78))
+            setStroke(1.dp(), Color.argb(110, 78, 78, 90))
         }
         setOnClickListener {
             performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -528,8 +532,8 @@ class TransformerImeService : InputMethodService() {
     private fun qwertyStateDrawable(accent: Boolean): StateListDrawable {
         fun shape(color: Int) = GradientDrawable().apply { setColor(color); cornerRadius = 6.dp().toFloat() }
         return StateListDrawable().apply {
-            addState(intArrayOf(android.R.attr.state_pressed), shape(if (accent) ACCENT_PRESSED else Color.argb(235, 78, 78, 78)))
-            addState(intArrayOf(), shape(if (accent) ACCENT else Color.argb(205, 28, 28, 34)))
+            addState(intArrayOf(android.R.attr.state_pressed), shape(if (accent) ACCENT_PRESSED else Color.argb(120, 78, 78, 88)))
+            addState(intArrayOf(), shape(if (accent) ACCENT else Color.argb(16, 0, 0, 0)))
         }
     }
 
@@ -844,9 +848,8 @@ class TransformerImeService : InputMethodService() {
     private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 55.dp())
 
     /**
-     * Audio-reactive background that is mounted only behind the key area.
-     * Quiet audio stays blue/cyan, medium volume moves through violet/magenta,
-     * and loud peaks shift toward hot pink/orange. Fast rises create a short beat envelope.
+     * v0.10.2 bottom-glow renderer. The key area is black at silence. Audio only adds light
+     * from the bottom edge upward, rather than painting the whole keyboard a solid colour.
      */
     private class AudioPulseBackgroundView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -860,17 +863,21 @@ class TransformerImeService : InputMethodService() {
             audioEnabled = enabled
             val v = value.coerceIn(0f, 1f)
             val rise = (v - previousTarget).coerceAtLeast(0f)
-            if (rise > 0.018f) {
-                beat = maxOf(beat, (rise * 4.2f + v * 0.32f).coerceIn(0f, 1f))
+            if (rise > 0.015f) {
+                beat = maxOf(beat, (rise * 4.8f + v * 0.30f).coerceIn(0f, 1f))
             }
             previousTarget = v
             target = v
             smoothed = if (target > smoothed) {
-                smoothed * 0.22f + target * 0.78f
+                smoothed * 0.18f + target * 0.82f
             } else {
-                smoothed * 0.74f + target * 0.26f
+                smoothed * 0.78f + target * 0.22f
             }
-            beat *= 0.80f
+            beat *= 0.78f
+            if (target < 0.01f && smoothed < 0.018f && beat < 0.018f) {
+                smoothed = 0f
+                beat = 0f
+            }
             invalidate()
         }
 
@@ -879,58 +886,78 @@ class TransformerImeService : InputMethodService() {
             canvas.drawColor(Color.BLACK)
             if (!audioEnabled || width <= 0 || height <= 0) return
 
-            val energy = (smoothed * 0.78f + beat * 0.62f).coerceIn(0f, 1f)
-            val pulse = maxOf(smoothed, beat).coerceIn(0f, 1f)
+            val rawEnergy = (smoothed * 0.82f + beat * 0.48f).coerceIn(0f, 1f)
+            val energy = if (rawEnergy < 0.018f) 0f
+            else ((rawEnergy - 0.018f) / 0.982f).coerceIn(0f, 1f)
+            if (energy <= 0f) return
 
-            val low = Color.rgb(0, 132, 190)
-            val medium = Color.rgb(106, 48, 230)
-            val high = Color.rgb(255, 34, 126)
-            val peak = Color.rgb(255, 116, 34)
+            val cyan = Color.rgb(0, 178, 255)
+            val violet = Color.rgb(112, 58, 255)
+            val pink = Color.rgb(255, 35, 154)
+            val orange = Color.rgb(255, 112, 36)
             val reactive = when {
-                energy < 0.38f -> blend(low, medium, energy / 0.38f)
-                energy < 0.76f -> blend(medium, high, (energy - 0.38f) / 0.38f)
-                else -> blend(high, peak, (energy - 0.76f) / 0.24f)
+                energy < 0.34f -> blend(cyan, violet, energy / 0.34f)
+                energy < 0.72f -> blend(violet, pink, (energy - 0.34f) / 0.38f)
+                else -> blend(pink, orange, (energy - 0.72f) / 0.28f)
             }
 
-            val top = blend(Color.rgb(20, 10, 62), reactive, 0.25f + energy * 0.42f)
-            val bottom = blend(Color.rgb(0, 72, 110), reactive, 0.36f + energy * 0.50f)
+            // The glow grows upward with volume, but never fills the whole surface as a flat colour.
+            val glowHeight = height * (0.30f + energy * 0.46f + beat * 0.08f)
+            val topY = (height - glowHeight).coerceAtLeast(0f)
+            val bottomAlpha = (54 + energy * 170 + beat * 24).toInt().coerceIn(0, 248)
+            val midAlpha = (bottomAlpha * (0.54f + energy * 0.16f)).toInt()
+            val soft = blend(reactive, Color.rgb(32, 30, 82), 0.36f)
+            val bright = blend(reactive, Color.WHITE, 0.13f + beat * 0.08f)
+
             paint.shader = LinearGradient(
-                0f, 0f, width.toFloat(), height.toFloat(),
-                intArrayOf(top, blend(top, bottom, 0.52f), bottom),
-                floatArrayOf(0f, 0.52f, 1f),
+                0f,
+                topY,
+                0f,
+                height.toFloat(),
+                intArrayOf(
+                    Color.TRANSPARENT,
+                    withAlpha(soft, (midAlpha * 0.30f).toInt()),
+                    withAlpha(reactive, midAlpha),
+                    withAlpha(bright, bottomAlpha)
+                ),
+                floatArrayOf(0f, 0.30f, 0.72f, 1f),
                 Shader.TileMode.CLAMP
             )
-            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+            canvas.drawRect(0f, topY, width.toFloat(), height.toFloat(), paint)
 
-            val alpha = (55 + energy * 178 + beat * 32).toInt().coerceIn(0, 255)
-            val radius = maxOf(width, height) * (0.46f + pulse * 0.34f + beat * 0.12f)
+            // A wide light source just below the keyboard makes it look illuminated from underneath.
+            val radius = width * (0.58f + energy * 0.22f + beat * 0.08f)
             paint.shader = RadialGradient(
                 width * 0.50f,
-                height * (0.55f - beat * 0.04f),
+                height * 1.04f,
                 radius,
                 intArrayOf(
-                    withAlpha(reactive, alpha),
-                    withAlpha(blend(reactive, Color.WHITE, 0.16f), (alpha * 0.48f).toInt()),
+                    withAlpha(bright, (bottomAlpha * 0.90f).toInt()),
+                    withAlpha(reactive, (bottomAlpha * 0.56f).toInt()),
+                    withAlpha(soft, (bottomAlpha * 0.18f).toInt()),
                     Color.TRANSPARENT
                 ),
-                floatArrayOf(0f, 0.50f, 1f),
+                floatArrayOf(0f, 0.30f, 0.66f, 1f),
                 Shader.TileMode.CLAMP
             )
-            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+            canvas.drawRect(0f, topY, width.toFloat(), height.toFloat(), paint)
 
-            if (beat > 0.08f) {
-                val ringRadius = maxOf(width, height) * (0.26f + beat * 0.38f)
+            // Short white-hot lift on transients. It fades quickly with the beat envelope.
+            if (beat > 0.10f) {
+                val beatRadius = width * (0.34f + beat * 0.18f)
                 paint.shader = RadialGradient(
-                    width * 0.50f, height * 0.53f, ringRadius,
+                    width * 0.50f,
+                    height * 1.02f,
+                    beatRadius,
                     intArrayOf(
-                        withAlpha(Color.WHITE, (beat * 62f).toInt()),
-                        withAlpha(reactive, (beat * 110f).toInt()),
+                        withAlpha(Color.WHITE, (beat * 82f).toInt()),
+                        withAlpha(reactive, (beat * 95f).toInt()),
                         Color.TRANSPARENT
                     ),
-                    floatArrayOf(0f, 0.62f, 1f),
+                    floatArrayOf(0f, 0.46f, 1f),
                     Shader.TileMode.CLAMP
                 )
-                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+                canvas.drawRect(0f, topY, width.toFloat(), height.toFloat(), paint)
             }
             paint.shader = null
         }
@@ -949,10 +976,11 @@ class TransformerImeService : InputMethodService() {
     }
 
     companion object {
-        private val KEY_BLACK = Color.argb(207, 0, 0, 0)
-        private val GRID_LINE = Color.argb(165, 42, 42, 52)
-        private val PRESSED = Color.argb(235, 76, 76, 84)
-        private val MODE_PILL = Color.argb(220, 55, 55, 62)
+        // Normal keys no longer carry an opaque black shade. At silence the background itself is black.
+        private val KEY_BLACK = Color.TRANSPARENT
+        private val GRID_LINE = Color.argb(118, 68, 68, 82)
+        private val PRESSED = Color.argb(120, 82, 82, 94)
+        private val MODE_PILL = Color.argb(82, 52, 52, 64)
         private val ACCENT = Color.rgb(126, 203, 196)
         private val ACCENT_PRESSED = Color.rgb(96, 173, 166)
         private val EMOJIS = listOf(
