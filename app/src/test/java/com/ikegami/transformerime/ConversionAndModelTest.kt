@@ -52,6 +52,16 @@ class ConversionAndModelTest {
     }
 
     @Test
+    fun modifierFlickDirectlyAppliesDakutenAndHandakuten() {
+        assertEquals("が", FlickKana.applyDakuten("か"))
+        assertEquals("づ", FlickKana.applyDakuten("っ"))
+        assertEquals("ば", FlickKana.applyDakuten("ぱ"))
+        assertEquals("ぱ", FlickKana.applyHandakuten("は"))
+        assertEquals("ぱ", FlickKana.applyHandakuten("ば"))
+        assertEquals("こんにちは", FlickKana.applyHandakuten("こんにちは"))
+    }
+
+    @Test
     fun nextCandidatePoolUsesCommittedContext() {
         val afterYoroshiku = NextCandidateGenerator.candidates("確認しました。よろしく", emptyList())
         assertEquals("お願いします", afterYoroshiku.first())
