@@ -1,210 +1,140 @@
 # Transformer IME
 
-Android向けの、完全オンデバイスTransformerを組み込んだ日本語IME実験プロジェクトです。
+Android向けの、完全オンデバイスAI日本語IME実験プロジェクトです。
 
-## 現在の状態: v0.5.0
+## 現在の状態: v0.8.0
 
-- Android `InputMethodService` として登録可能
-- **日本語は12キー・5方向フリック入力**
-- **英数モードだけQWERTY**（Shift対応）
-- **Gboard系の5列配置を参考にした黒基調UI**
-- 左列: Undo / カーソル左 / 記号 / 英数切替
-- 右列: Backspace / カーソル右 / 変換 / Enter
-- 濁点 / 半濁点 / 小文字切替
-- **Mozc OSS辞書ベースの通常かな漢字変換**
-- 地名・人名・一般語を含む拡張辞書をSQLiteとしてオンデバイス検索
-- 文節候補を組み合わせるビーム探索
-- 学習済みTiny Transformerによる即時ランキング
-- **日本語文コーパスで学習した5,022,784 parameter MoE Transformer**による非同期再ランキング
-- **変換確定後、直前文脈から次語・次フレーズ候補を予測**
-- 次候補はTinyで即表示し、JP5Mが直前96文字から再ランキング
-- AI ON/OFF
-- パスワード欄ではAI予測を停止
-- gesture navigation / system gesture / tappable領域を考慮したSafe Area
-- `INTERNET` permissionなし。実機での変換・推論は完全オフライン
+- Android `InputMethodService`
+- 日本語: 12キー・5方向フリック入力
+- 英数: QWERTY
+- 黒基調の5列レイアウト
+- `や`: 上=ゆ / 下=よ / 左右=括弧
+- `゛゜大小`: 小文字が存在する文字は小文字を最優先（`つ→っ→づ`, `う→ぅ→ゔ`）
+- Mozc OSS由来のSQLite辞書 + 文節ビーム探索
+- 読み途中の前方一致変換予測
+- Tatoeba由来の文脈→次候補DB
+- **Zenzai系かな漢字変換専用モデルを約190.2M parameters搭載**
+- llama.cpp / GGUF Q5_K_M / Android arm64 CPU推論
+- パスワード欄ではAI予測停止
+- `INTERNET` permissionなし。変換・推論は完全オフライン
 
-## v0.5 日本語入力UI
+## v0.8: Mozc draft + Zenzai neural verifier
 
-日本語モードは、一般的なスマートフォン向け12キー配列に合わせて、左右に機能列・中央に3列のかなキーを置きます。Google/Gboardのロゴ・専用画像・専用アセットは使用していません。
+v0.7までは、辞書が作った候補を汎用的な日本語LMが後段で並べ替えていました。
+
+v0.8ではazooKey/Zenzaiの設計を参考に、かな漢字変換専用モデルへ直接タスクを渡します。
 
 ```text
-↶      あ      か      さ      ⌫
-◀      た      な      は      ▶
-☺記    ま      や      ら      変換
-あa1   ゛゜小   わ      、。    ↵
+左文脈 + 読み
+    ↓
+Mozc辞書 / ビーム探索
+    ↓
+高速なドラフト候補
+    ↓
+zenz-v3.2-small (~95.1M)
+    ↓
+ニューラル生成でドラフトを検証・補正
+    ↓ 低確信・不一致時のみ
+zenz-v3.1-small (~95.1M)
+    ↓
+最終候補
 ```
 
-基本フリック方向:
+2モデル合計は約190.2M parametersですが、通常はPrimaryだけ推論します。Second opinionはPrimaryが辞書ドラフトと強く食い違い、かつ確信度が低い場合だけ使います。
+
+## Zenzai v3 prompt
+
+変換時はZenzai v3互換の専用タグ形式を使います。
 
 ```text
-       ↑ う
-左 い   あ   え 右
-       ↓ お
+<context-tag><左文脈><input-tag><カタカナ読み><output-tag>
 ```
 
-黒背景、白文字、薄いグリッド、ダークグレーのモードキー、ミント系のEnterキーという構成です。英数へ切り替えるとダークテーマのQWERTYになります。
+これにより、単に「文章として次に自然な文字」を採点するのではなく、モデルが「この読みをこの文脈ではどう変換するか」を直接評価できます。
 
-## v0.5 確定後の文脈予測
+確定後の予測では、左文脈から次に入力されそうな**読み**をZenzモデルに生成させ、その読みをMozc辞書へ戻して漢字候補を作ります。
 
-変換を確定した直後、IMEは `InputConnection` からカーソル直前の文章を取得します。
+## Neural models
 
-処理:
+### Primary
 
-```text
-確定済み文章
-  ↓
-直前160文字を取得
-  ↓
-Tiny Transformer + 文脈候補生成
-  ↓  即時表示
-候補プール
-  ↓
-JP5Mが直前96文字で再ランキング
-  ↓
-次語 / 次フレーズ候補
-```
+- `Miwa-Keita/zenz-v3.2-small-gguf`
+- GPT-2 architecture
+- 約95.1M parameters
+- Q5_K_M: 約74MB
+- Apache-2.0
 
-例:
+### Conditional fallback
 
-```text
-よろしく
-  ↓
-お願いします
-お願いいたします
-！
-```
+- `Miwa-Keita/zenz-v3.1-small-gguf`
+- GPT-2 architecture
+- 約95.1M parameters
+- Q5_K_M: 約74MB
+- CC BY-SA 4.0
 
-```text
-確認
-  ↓
-しました
-します
-お願いします
-```
+合計 neural capacity: **約190.2M parameters**
 
-JP5Mの再ランキングが完了すると候補先頭に次のように表示します。
+モデルはビルド時に取得しAPKへ同梱します。実行時にモデルをインターネットから取得しません。
 
-```text
-お願いします  ✦次JP5M 7ms
-```
+## llama.cpp Android runtime
 
-5Mモデルで自由生成するのではなく、Tinyモデル・定型候補・文脈トリガーから作った小さな候補集合をJP5Mに選ばせる構成です。IME用途ではレイテンシと安定性を優先しています。
+`llama.cpp` revision `b4846` をNDKでarm64向けにビルドし、JNI経由でGGUFモデルを読みます。
+
+- mmap model loading
+- CPU inference
+- 2〜6 threadsを端末CPU数から選択
+- 256 token context
+- greedy direct conversion
+- top-1 / top-2 logit marginを確信度としてカスケード判定に使用
+
+モデルファイルはAPK assetsから初回だけアプリ内部ストレージへコピーし、その後は同じファイルを再利用します。
 
 ## 通常かな漢字変換
 
-通常変換は **Mozc OSS dictionary** をビルド時に取得し、Android向けの読み→候補SQLiteへ再構成します。
-
-例:
+Mozc OSS dictionaryをビルド時にAndroid向けSQLiteへ再構成します。
 
 ```text
 うめだ → 梅田
+しんじゅくえき → 新宿駅
 はっとり → 服部
-たけはら → 竹原
 ```
 
-CIでは `dictionary00.txt`〜`dictionary09.txt` と `dictionary_manual/places.tsv` / `words.tsv` を読み、同じ読みの候補をコスト順に圧縮して `mozc_compact.db` を作ります。入力時は必要な読みだけSQLiteから取得しLRUキャッシュします。
+読み途中のprefix indexも持つため、入力完了前から固有名詞候補を出せます。
 
-Mozc OSS辞書はGoogle日本語入力の商用辞書そのものではありません。Google日本語入力専用の大規模Web語彙はOSS版には含まれません。
+## 確定後の文脈予測
 
-## AI構成
-
-### Tiny Transformer
-
-- 1 Transformer block
-- hidden size: 24
-- attention heads: 3
-- FFN: 48
-- context: 12 tokens
-- vocabulary: 65 tokens
-
-役割: 入力直後の変換候補ランキングと、確定後の次候補プール生成。
-
-### Japanese Medium MoE Transformer
-
-- **5,022,784 parameters**
-- 4 Transformer layers
-- hidden size: 128
-- 4 attention heads
-- 16 FFN experts / layer
-- Top-1 expert routing
-- FFN hidden: 272
-- context: 24 character tokens
-- hash vocabulary buckets: 1024
-- symmetric INT8 quantization
-
-変換中:
+即時表示は既存のTiny + corpus context DBを使い、Zenzaiモデルの準備ができるとニューラル予測に更新します。
 
 ```text
-梅田  ✦JP5M·D 7ms
+確定済み文脈
+  ↓
+Tiny / context DB（即時候補）
+  ↓
+Zenzai: 次の読みを生成
+  ↓
+Mozc: 読み→表記候補
+  ↓
+候補バー更新
 ```
 
-確定後:
+## セキュリティ
 
-```text
-お願いします  ✦次JP5M 7ms
-```
+- INTERNET permissionなし
+- 入力内容の外部送信なし
+- パスワード欄ではAI処理停止
+- 生入力ログをRelease版へ保存しない
 
-## 日本語コーパス学習
+## Build
 
-学習スクリプトは `tools/train_medium_moe_japanese.py` です。
+GitHub Actionsでは以下を自動検証します。
 
-- Tatoeba Project 日本語 sentence weekly export
-- `jpn_sentences.tsv.bz2`
-- text license: Creative Commons Attribution 2.0 France (CC BY 2.0 FR)
-- attribution: Tatoeba Project contributors
+1. Mozc辞書生成 / 固有名詞テスト
+2. 文脈予測DB生成
+3. Zenzai v3.2 / v3.1 Q5_K_M取得とGGUF検証
+4. pinned llama.cppのhost build
+5. Zenzaiによる実かな漢字変換smoke test
+6. Kotlin unit tests
+7. Android NDK arm64 native build
+8. APK内にdual GGUF + `libzenzjni.so` が存在することを検証
 
-生コーパスはAPKへ格納せず、学習後にsymmetric INT8へ量子化した `medium_moe_jpn.q8` のみを含めます。
-
-## UI / Safe Area
-
-次のbottom insetを比較して最大値を採用し、さらに最低44dpの安全領域を確保します。
-
-- `WindowInsets.Type.navigationBars()`
-- `WindowInsets.Type.systemGestures()`
-- `WindowInsets.Type.mandatorySystemGestures()`
-- `WindowInsets.Type.tappableElement()`
-
-## プライバシー
-
-IME本体はインターネット権限を要求しません。入力文脈・辞書検索・Transformer推論は端末内で処理します。パスワード入力欄ではTransformer候補を停止します。
-
-TatoebaとMozcのダウンロードは**ビルド時のみ**です。インストール後のIMEが外部へ入力内容を送ることはありません。
-
-## CI / ビルド
-
-GitHub Actionsは次を自動実行します。
-
-1. Mozc OSS compact辞書を生成 / cache復元
-2. `うめだ → 梅田` を検証
-3. Tatoeba学習済みJP5Mを生成 / cache復元
-4. 文脈次候補・フリック・モデルのunit test
-5. APK build
-
-```bash
-gradle :app:testDebugUnitTest
-gradle :app:assembleDebug
-```
-
-生成先:
-
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
-
-## 次の実装候補
-
-- ユーザー辞書・個人頻度学習
-- 文節境界の手動変更
-- フリック方向のポップアップガイド強化
-- 本格的な絵文字・記号パネル
-- 次候補プールをMozc品詞情報から生成
-- INT4量子化
-- より長い日本語コーパス学習
-
-## License / attribution
-
-Application prototype: License TBD.
-
-Corpus attribution: Tatoeba Project contributors, text distributed under CC BY 2.0 FR.
-
-Dictionary source: Mozc OSS dictionary (`google/mozc`). Mozcの辞書データにはIPAdic等の第三者由来データが含まれます。詳細はMozc upstreamの `src/data/dictionary_oss/README.txt` を参照してください。
+第三者モデル・コンポーネントのライセンスは [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) を参照してください。
