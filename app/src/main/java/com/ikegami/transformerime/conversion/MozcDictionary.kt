@@ -4,10 +4,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import java.io.File
 
-/**
- * Read-only compact dictionary generated from Mozc OSS data at CI build time.
- * v0.6 adds a prefix-completion table so partially typed readings can suggest longer words/names.
- */
+/** Read-only compact dictionary generated from Mozc OSS data at CI build time. */
 object MozcDictionary {
     data class Entry(val surface: String, val cost: Float)
     data class PredictiveEntry(val reading: String, val surface: String, val cost: Float)
@@ -91,7 +88,6 @@ object MozcDictionary {
                         }
                     }
                 }
-
                 synchronized(cache) {
                     chunk.forEach { reading ->
                         val values = queried[reading]?.toList().orEmpty()
@@ -112,20 +108,30 @@ object MozcDictionary {
             predictionCache[prefix]?.let { return it.take(maxCandidates) }
         }
 
-        val values = ArrayList<PredictiveEntry>(maxCandidates)
+        // The asset stores only 2- and 3-kana indexes.  For longer input, use the first three
+        // kana as the compact lookup key, then filter by the complete live reading here.
+        val indexKey = prefix.take(if (prefix.length >= 3) 3 else 2)
+        val queried = ArrayList<PredictiveEntry>(16)
         db.rawQuery(
-            "SELECT reading, surface, cost FROM predictions WHERE prefix=? ORDER BY cost LIMIT ?",
-            arrayOf(prefix, maxCandidates.toString())
+            "SELECT reading, surface, cost FROM predictions WHERE prefix=? ORDER BY cost LIMIT 16",
+            arrayOf(indexKey)
         ).use { cursor ->
             while (cursor.moveToNext()) {
-                values += PredictiveEntry(
-                    reading = cursor.getString(0),
+                val reading = cursor.getString(0)
+                if (!reading.startsWith(prefix)) continue
+                queried += PredictiveEntry(
+                    reading = reading,
                     surface = cursor.getString(1),
                     cost = cursor.getInt(2).coerceAtLeast(0) / 10_000f
                 )
             }
         }
-        val frozen = values.toList()
+
+        val frozen = queried
+            .sortedWith(compareBy<PredictiveEntry> { it.cost }
+                .thenBy { it.reading.length - prefix.length }
+                .thenBy { it.surface.length })
+            .take(maxCandidates)
         synchronized(predictionCache) { predictionCache[prefix] = frozen }
         return frozen
     }
