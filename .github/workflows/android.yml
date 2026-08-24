@@ -114,8 +114,8 @@ jobs:
           assert path.read_bytes()[:4] == b'GGUF'
           assert path.stat().st_size > 65_000_000
           result = {
-              'version': '0.10.5',
-              'design': 'InputView-reuse-safe IME; process-wide serialized Zenzai v3.2; stale-job guards; resilient raw-reading fallback; fail-safe Audio Pulse; navigation+gesture safe insets',
+              'version': '0.10.6',
+              'design': 'Unicode-safe JNI bridge for llama UTF-8; InputView-reuse-safe IME; process-wide serialized Zenzai v3.2; stale-job guards; resilient raw-reading fallback; fail-safe Audio Pulse; gesture-safe insets',
               'estimated_total_parameters': 95_100_000,
               'quantization': 'Q5_K_M',
               'inference_trials': 10,
@@ -161,7 +161,7 @@ jobs:
           test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
-      - name: Verify v0.10.5 stability architecture
+      - name: Verify v0.10.6 stability and JNI Unicode architecture
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -171,13 +171,33 @@ jobs:
           pulse = Path('app/src/main/java/com/ikegami/transformerime/audio/AudioPulseService.kt').read_text(encoding='utf-8')
           flick = Path('app/src/main/java/com/ikegami/transformerime/ime/FlickKana.kt').read_text(encoding='utf-8')
           state = Path('app/src/main/java/com/ikegami/transformerime/audio/AudioPulseState.kt').read_text(encoding='utf-8')
+          jni = Path('app/src/main/cpp/zenz_jni.cpp').read_text(encoding='utf-8')
           gradle = Path('app/build.gradle').read_text(encoding='utf-8')
 
-          assert "versionName '0.10.5'" in gradle
+          assert "versionName '0.10.6'" in gradle
           assert 'INFERENCE_TRIALS = 10' in Path('app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt').read_text(encoding='utf-8')
 
-          # Root cause regression: InputMethodService can reuse the same InputView. Finishing the
-          # view may pause updates, but it must not destroy the references needed on the next show.
+          # Crash regression from the POCO/HyperOS tombstone. llama token pieces are ordinary
+          # UTF-8 byte streams and can end mid-codepoint at max_tokens. NewStringUTF expects
+          # Modified UTF-8 and CheckJNI aborts the whole process on the malformed tail.
+          assert 'jstring utf8_to_jstring' in jni
+          assert 'std::string jstring_to_utf8' in jni
+          assert 'env->NewString(' in jni
+          assert 'i + need > text.size()' in jni
+          assert 'dropped_tail = true' in jni
+          assert '0xD800' in jni and '0xDC00' in jni
+          assert 'env->NewStringUTF' not in jni
+          assert 'env->GetStringUTFChars' not in jni
+          # Exact shape of the reported failure: a valid Japanese UTF-8 prefix ending in an
+          # incomplete 3-byte sequence. It must remain a permanent regression fixture.
+          crash_tail = bytes.fromhex('e3 82 a2 e3 82 a4 e3 83 8e ee b8')
+          try:
+              crash_tail.decode('utf-8', errors='strict')
+              raise AssertionError('fixture unexpectedly became valid UTF-8')
+          except UnicodeDecodeError as exc:
+              assert exc.start == len(crash_tail) - 2
+
+          # InputView reuse stability from v0.10.5.
           assert 'override fun onStartInputView' in ime
           assert 'private fun resumeInputView()' in ime
           finish = ime.split('override fun onFinishInputView', 1)[1].split('private fun resumeInputView', 1)[0]
@@ -187,7 +207,7 @@ jobs:
           assert 'inputViewActive = true' in ime
           assert 'background.isAttachedToWindow' in ime
 
-          # HyperOS / gesture navigation must reserve the actual gesture area, not navigationBars only.
+          # HyperOS / gesture navigation safe area.
           assert 'val minimumBottomSafe = 30.dp()' in ime
           assert 'val maximumBottomSafe = 56.dp()' in ime
           assert 'WindowInsets.Type.navigationBars()' in ime
@@ -195,26 +215,24 @@ jobs:
           assert 'WindowInsets.Type.mandatorySystemGestures()' in ime
           assert 'reportedBottom + 6.dp()' in ime
 
-          # The native GGUF engine is one process-wide context. Every service instance must share
-          # one lock before entering llama.cpp.
+          # All service instances serialize access to the one process-wide llama context.
           assert '@Volatile private var sharedInstance' in medium
           assert 'private val nativeInferenceLock = Any()' in medium
           assert 'synchronized(nativeInferenceLock)' in medium
           assert 'fun close() = Unit' in medium
           assert 'sharedInstance?.takeIf { it.corpusTrained }' in medium
 
-          # Queued old keystrokes must be dropped before spending another expensive native call.
+          # Queued stale keystrokes are rejected before native inference.
           assert 'compositionBuffer.toString() != reading' in ime
           assert 'epoch != candidateEpoch' in ime
           assert 'epoch != predictionEpoch' in ime
 
-          # Conversion remains usable even if SQLite/RAG/native startup has a transient failure.
+          # Conversion stays usable on transient DB/RAG failures.
           assert 'CandidateGenerator.candidates(reading)' in ime
           assert 'getOrElse { listOf(reading) }' in ime
           assert '(rag + dictionary + reading)' in ime
 
-          # MediaProjection cannot be restored from START_STICKY; read failures must terminate
-          # rather than leaving a zombie Pulse or spinning the CPU.
+          # Audio Pulse is retained because the supplied native tombstone does not involve it.
           assert 'START_NOT_STICKY' in pulse
           assert 'AudioRecord.ERROR_DEAD_OBJECT' in pulse
           assert 'AudioRecord.ERROR_INVALID_OPERATION' in pulse
@@ -223,7 +241,7 @@ jobs:
           assert 'AudioPulseState.publish(envelope)' in pulse
           assert '@Volatile var level' in state
 
-          # Requested v0.10.4 UX remains intact.
+          # Existing UX remains intact.
           assert 'functionButton("空白")' in ime
           assert 'commitRawReading()' in ime
           assert 'private fun kanaModifierFlickButton' in ime
@@ -234,7 +252,7 @@ jobs:
           assert 'val glowHeight = height * (0.52f' in ime
 
           assert not Path('app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf').exists()
-          print('v0.10.5 stability source checks passed')
+          print('v0.10.6 JNI Unicode and stability source checks passed')
           PY
 
       - uses: actions/setup-java@v4
@@ -278,13 +296,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.5-Zenzai95M-x10-LifecycleFix-debug
+          name: Transformer-IME-v0.10.6-Zenzai95M-x10-UnicodeSafeJNI-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.10.5 metadata
+      - name: Upload v0.10.6 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.5-metadata
+          name: Transformer-IME-v0.10.6-metadata
           path: |
             app/src/main/assets/zenzai95.meta.json
             app/src/main/assets/mozc_compact.meta.json

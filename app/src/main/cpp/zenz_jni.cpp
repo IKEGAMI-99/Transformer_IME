@@ -15,6 +15,7 @@
 
 #define LOG_TAG "TransformerIME-Zenz"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
@@ -52,6 +53,156 @@ int thread_count() {
     const unsigned int hw = std::thread::hardware_concurrency();
     const int available = hw > 2 ? static_cast<int>(hw) - 2 : 2;
     return std::clamp(available, 2, 6);
+}
+
+void append_utf8(std::string & out, uint32_t cp) {
+    if (cp <= 0x7F) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FF) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+// JNI's GetStringUTFChars/NewStringUTF use Modified UTF-8, not ordinary UTF-8.
+// llama.cpp consumes and produces ordinary UTF-8 byte streams, so crossing the JNI
+// boundary through Modified UTF-8 is unsafe for supplementary characters and for a
+// generation that stops in the middle of a multi-byte token piece.
+std::string jstring_to_utf8(JNIEnv * env, jstring value) {
+    if (!value) return {};
+    const jsize length = env->GetStringLength(value);
+    const jchar * chars = env->GetStringChars(value, nullptr);
+    if (!chars) return {};
+
+    std::string out;
+    out.reserve(static_cast<size_t>(length) * 3);
+    for (jsize i = 0; i < length; ++i) {
+        uint32_t cp = chars[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+            if (i + 1 < length) {
+                const uint32_t low = chars[i + 1];
+                if (low >= 0xDC00 && low <= 0xDFFF) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                    ++i;
+                } else {
+                    cp = 0xFFFD;
+                }
+            } else {
+                cp = 0xFFFD;
+            }
+        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            cp = 0xFFFD;
+        }
+        append_utf8(out, cp);
+    }
+    env->ReleaseStringChars(value, chars);
+    return out;
+}
+
+bool continuation(uint8_t b) {
+    return (b & 0xC0) == 0x80;
+}
+
+// Lossy but crash-proof UTF-8 -> Java UTF-16 conversion.
+// A truncated tail is dropped because llama token pieces may stop mid-codepoint when
+// max_tokens is reached. Invalid bytes inside the stream become U+FFFD. This is done
+// before JNI sees the data, so CheckJNI can never abort on malformed Modified UTF-8.
+jstring utf8_to_jstring(JNIEnv * env, const std::string & text) {
+    std::vector<jchar> utf16;
+    utf16.reserve(text.size());
+    bool repaired = false;
+    bool dropped_tail = false;
+
+    size_t i = 0;
+    while (i < text.size()) {
+        const uint8_t b0 = static_cast<uint8_t>(text[i]);
+        uint32_t cp = 0;
+        size_t need = 0;
+
+        if (b0 <= 0x7F) {
+            cp = b0;
+            need = 1;
+        } else if (b0 >= 0xC2 && b0 <= 0xDF) {
+            need = 2;
+        } else if (b0 >= 0xE0 && b0 <= 0xEF) {
+            need = 3;
+        } else if (b0 >= 0xF0 && b0 <= 0xF4) {
+            need = 4;
+        } else {
+            utf16.push_back(static_cast<jchar>(0xFFFD));
+            repaired = true;
+            ++i;
+            continue;
+        }
+
+        if (i + need > text.size()) {
+            dropped_tail = true;
+            break;
+        }
+
+        bool valid = true;
+        if (need >= 2 && !continuation(static_cast<uint8_t>(text[i + 1]))) valid = false;
+        if (need >= 3 && !continuation(static_cast<uint8_t>(text[i + 2]))) valid = false;
+        if (need >= 4 && !continuation(static_cast<uint8_t>(text[i + 3]))) valid = false;
+
+        if (valid && need == 2) {
+            cp = ((b0 & 0x1F) << 6) |
+                 (static_cast<uint8_t>(text[i + 1]) & 0x3F);
+        } else if (valid && need == 3) {
+            const uint8_t b1 = static_cast<uint8_t>(text[i + 1]);
+            if ((b0 == 0xE0 && b1 < 0xA0) || (b0 == 0xED && b1 >= 0xA0)) {
+                valid = false;
+            } else {
+                cp = ((b0 & 0x0F) << 12) |
+                     ((b1 & 0x3F) << 6) |
+                     (static_cast<uint8_t>(text[i + 2]) & 0x3F);
+            }
+        } else if (valid && need == 4) {
+            const uint8_t b1 = static_cast<uint8_t>(text[i + 1]);
+            if ((b0 == 0xF0 && b1 < 0x90) || (b0 == 0xF4 && b1 >= 0x90)) {
+                valid = false;
+            } else {
+                cp = ((b0 & 0x07) << 18) |
+                     ((b1 & 0x3F) << 12) |
+                     ((static_cast<uint8_t>(text[i + 2]) & 0x3F) << 6) |
+                     (static_cast<uint8_t>(text[i + 3]) & 0x3F);
+            }
+        }
+
+        if (!valid || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            utf16.push_back(static_cast<jchar>(0xFFFD));
+            repaired = true;
+            ++i;
+            continue;
+        }
+
+        if (cp <= 0xFFFF) {
+            utf16.push_back(static_cast<jchar>(cp));
+        } else {
+            cp -= 0x10000;
+            utf16.push_back(static_cast<jchar>(0xD800 + (cp >> 10)));
+            utf16.push_back(static_cast<jchar>(0xDC00 + (cp & 0x3FF)));
+        }
+        i += need;
+    }
+
+    if (repaired || dropped_tail) {
+        LOGW("sanitized model UTF-8 before JNI (repaired=%d dropped_tail=%d bytes=%zu)",
+             repaired ? 1 : 0, dropped_tail ? 1 : 0, text.size());
+    }
+
+    const jchar empty = 0;
+    return env->NewString(utf16.empty() ? &empty : utf16.data(),
+                          static_cast<jsize>(utf16.size()));
 }
 
 std::vector<llama_token> tokenize(const Engine & e, const std::string & text, bool add_special = true) {
@@ -226,9 +377,9 @@ GenerationSet multi_generate(Engine & e, const std::string & prompt, int max_tok
 jobjectArray make_generation_result(JNIEnv * env, const Generation & result) {
     jclass string_class = env->FindClass("java/lang/String");
     jobjectArray array = env->NewObjectArray(3, string_class, nullptr);
-    env->SetObjectArrayElement(array, 0, env->NewStringUTF(result.text.c_str()));
-    env->SetObjectArrayElement(array, 1, env->NewStringUTF(std::to_string(result.latency_ms).c_str()));
-    env->SetObjectArrayElement(array, 2, env->NewStringUTF(std::to_string(result.margin).c_str()));
+    env->SetObjectArrayElement(array, 0, utf8_to_jstring(env, result.text));
+    env->SetObjectArrayElement(array, 1, utf8_to_jstring(env, std::to_string(result.latency_ms)));
+    env->SetObjectArrayElement(array, 2, utf8_to_jstring(env, std::to_string(result.margin)));
     return array;
 }
 
@@ -236,11 +387,11 @@ jobjectArray make_generation_set_result(JNIEnv * env, const GenerationSet & resu
     jclass string_class = env->FindClass("java/lang/String");
     const jsize size = static_cast<jsize>(1 + result.items.size() * 2);
     jobjectArray array = env->NewObjectArray(size, string_class, nullptr);
-    env->SetObjectArrayElement(array, 0, env->NewStringUTF(std::to_string(result.latency_ms).c_str()));
+    env->SetObjectArrayElement(array, 0, utf8_to_jstring(env, std::to_string(result.latency_ms)));
     jsize pos = 1;
     for (const auto & item : result.items) {
-        env->SetObjectArrayElement(array, pos++, env->NewStringUTF(item.text.c_str()));
-        env->SetObjectArrayElement(array, pos++, env->NewStringUTF(std::to_string(item.margin).c_str()));
+        env->SetObjectArrayElement(array, pos++, utf8_to_jstring(env, item.text));
+        env->SetObjectArrayElement(array, pos++, utf8_to_jstring(env, std::to_string(item.margin)));
     }
     return array;
 }
@@ -260,13 +411,13 @@ Java_com_ikegami_transformerime_model_ZenzaiNative_nativeLoadModel(JNIEnv * env,
     std::lock_guard<std::mutex> guard(e.mutex);
     e.clear();
 
-    const char * path = env->GetStringUTFChars(jpath, nullptr);
+    const std::string path = jstring_to_utf8(env, jpath);
+    if (path.empty()) return 0;
     llama_model_params mp = llama_model_default_params();
     mp.use_mmap = true;
     mp.use_mlock = false;
     mp.n_gpu_layers = 0;
-    e.model = llama_model_load_from_file(path, mp);
-    env->ReleaseStringUTFChars(jpath, path);
+    e.model = llama_model_load_from_file(path.c_str(), mp);
     if (!e.model) {
         LOGE("failed to load model %d", index);
         return 0;
@@ -296,9 +447,8 @@ Java_com_ikegami_transformerime_model_ZenzaiNative_nativeGenerate(JNIEnv * env, 
     if (index < 0 || index > 1 || !jprompt) return make_generation_result(env, {});
     Engine & e = g_engines[index];
     std::lock_guard<std::mutex> guard(e.mutex);
-    const char * chars = env->GetStringUTFChars(jprompt, nullptr);
-    std::string prompt(chars);
-    env->ReleaseStringUTFChars(jprompt, chars);
+    const std::string prompt = jstring_to_utf8(env, jprompt);
+    if (prompt.empty()) return make_generation_result(env, {});
     const GenerationSet set = multi_generate(e, prompt, std::clamp<int>(max_tokens, 1, 64), 1);
     Generation first = set.items.empty() ? Generation{} : set.items.front();
     first.latency_ms = set.latency_ms;
@@ -310,9 +460,8 @@ Java_com_ikegami_transformerime_model_ZenzaiNative_nativeGenerateCandidates(JNIE
     if (index < 0 || index > 1 || !jprompt) return make_generation_set_result(env, {});
     Engine & e = g_engines[index];
     std::lock_guard<std::mutex> guard(e.mutex);
-    const char * chars = env->GetStringUTFChars(jprompt, nullptr);
-    std::string prompt(chars);
-    env->ReleaseStringUTFChars(jprompt, chars);
+    const std::string prompt = jstring_to_utf8(env, jprompt);
+    if (prompt.empty()) return make_generation_set_result(env, {});
     const GenerationSet result = multi_generate(e, prompt,
         std::clamp<int>(max_tokens, 1, 64), std::clamp<int>(branches, 1, 12));
     return make_generation_set_result(env, result);
