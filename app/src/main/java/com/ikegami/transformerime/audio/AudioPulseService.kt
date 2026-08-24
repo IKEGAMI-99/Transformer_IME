@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import java.util.concurrent.Executors
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 /** Captures capturable system playback and publishes only a normalized 0..1 pulse level. */
@@ -62,7 +63,7 @@ class AudioPulseService : Service() {
         )
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("Transformer IME Audio Pulse")
-            .setContentText("システムオーディオに背景を同期中")
+            .setContentText("システムオーディオにキーボード背景を同期中")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()
@@ -106,23 +107,37 @@ class AudioPulseService : Service() {
         audioRecord = record
         running = true
         prefs().edit().putBoolean(KEY_ACTIVE, true).apply()
+
         executor.execute {
             val buffer = ShortArray(2048)
-            var smoothed = 0f
+            var envelope = 0f
             runCatching { record.startRecording() }
             while (running) {
-                val read = runCatching { record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING) }.getOrDefault(0)
+                val read = runCatching {
+                    record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
+                }.getOrDefault(0)
                 if (read <= 0) continue
+
                 var sum = 0.0
+                var samplePeak = 0.0
                 for (i in 0 until read) {
                     val x = buffer[i] / 32768.0
                     sum += x * x
+                    samplePeak = maxOf(samplePeak, abs(x))
                 }
+
                 val rms = sqrt(sum / read).toFloat()
-                val normalized = (rms * 8.5f).coerceIn(0f, 1f)
-                smoothed = if (normalized > smoothed) smoothed * 0.40f + normalized * 0.60f
-                else smoothed * 0.86f + normalized * 0.14f
-                prefs().edit().putFloat(KEY_LEVEL, smoothed).apply()
+                val rmsLevel = (rms * 10.5f).coerceIn(0f, 1f)
+                val peakLevel = (samplePeak.toFloat() * 2.45f).coerceIn(0f, 1f)
+                val reactive = (rmsLevel * 0.68f + peakLevel * 0.32f).coerceIn(0f, 1f)
+
+                envelope = if (reactive > envelope) {
+                    envelope * 0.18f + reactive * 0.82f
+                } else {
+                    envelope * 0.76f + reactive * 0.24f
+                }
+
+                prefs().edit().putFloat(KEY_LEVEL, envelope).apply()
             }
         }
     }
