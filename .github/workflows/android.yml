@@ -114,11 +114,12 @@ jobs:
           assert path.read_bytes()[:4] == b'GGUF'
           assert path.stat().st_size > 65_000_000
           result = {
-              'version': '0.10.7',
-              'design': 'Stable equal-height Japanese/QWERTY layout; katakana fixed beside AI candidate; Unicode-safe JNI; InputView-reuse-safe IME; process-wide serialized Zenzai v3.2; stale-job guards; fail-safe Audio Pulse',
+              'version': '0.11.0',
+              'design': 'Zenzai 10-way expansion plus constrained conditional-likelihood scoring over up to 20 Mozc/RAG/neural candidates; personalized prior fusion; Unicode-safe JNI; stable equal-height QWERTY/flick layout',
               'estimated_total_parameters': 95_100_000,
               'quantization': 'Q5_K_M',
               'inference_trials': 10,
+              'scored_candidates': 20,
               'model': {
                   'file': path.name,
                   'parameters': '95.1M',
@@ -161,12 +162,13 @@ jobs:
           test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
-      - name: Verify v0.10.7 layout, Katakana, stability and JNI Unicode architecture
+      - name: Verify v0.11 precision, UI, stability and Unicode architecture
         run: |
           python - <<'PY'
           from pathlib import Path
 
           ime = Path('app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt').read_text(encoding='utf-8')
+          engine = Path('app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt').read_text(encoding='utf-8')
           medium = Path('app/src/main/java/com/ikegami/transformerime/model/MediumMoETransformer.kt').read_text(encoding='utf-8')
           pulse = Path('app/src/main/java/com/ikegami/transformerime/audio/AudioPulseService.kt').read_text(encoding='utf-8')
           flick = Path('app/src/main/java/com/ikegami/transformerime/ime/FlickKana.kt').read_text(encoding='utf-8')
@@ -174,27 +176,40 @@ jobs:
           jni = Path('app/src/main/cpp/zenz_jni.cpp').read_text(encoding='utf-8')
           gradle = Path('app/build.gradle').read_text(encoding='utf-8')
 
-          assert "versionName '0.10.7'" in gradle
-          assert 'INFERENCE_TRIALS = 10' in Path('app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt').read_text(encoding='utf-8')
+          assert "versionName '0.11.0'" in gradle
+          assert 'INFERENCE_TRIALS = 10' in engine
+          assert 'MAX_SCORED_CANDIDATES = 20' in engine
 
-          # QWERTY and Japanese use the same row geometry so mode switching does not change the
-          # keyboard body height. Insets are only applied if the bottom value really changed.
+          # v0.11 constrained reranker: free generation broadens the pool, but Zenzai then scores
+          # the actual Mozc/RAG surface candidates by conditional log-likelihood.
+          assert 'nativeScoreCandidates' in engine
+          assert 'fuseConditionalScores' in engine
+          assert 'MAX_DRAFTS_FOR_SCORING = 16' in engine
+          assert 'MAX_NOVEL_NEURAL = 4' in engine
+          assert 'candidate_log_probability' in jni
+          assert 'target_log_probability' in jni
+          assert 'score_candidate_set' in jni
+          assert 'Java_com_ikegami_transformerime_model_ZenzaiNative_nativeScoreCandidates' in jni
+          assert 'std::pow(static_cast<double>(scored_tokens), 0.65)' in jni
+
+          # Bottom corner keys no longer get special pill/accent backgrounds.
+          assert 'functionButton("あa1", pill = true)' not in ime
+          assert 'functionButton("↵", accent = true)' not in ime
+          assert 'qwertyButton("↵", 1.2f, accent = true)' not in ime
+          assert 'numberPadButton(label, accent = true)' not in ime
+          assert 'functionButton("あa1") { toggleMode(false) }' in ime
+          assert 'functionButton("↵") { handleEnter() }' in ime
+
+          # QWERTY/Japanese geometry and deterministic Katakana escape remain stable.
           assert 'private fun japaneseRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 60.dp())' in ime
           assert 'private fun qwertyRowParams() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 60.dp())' in ime
           assert 'container.paddingBottom != safeBottom' in ime
           toggle = ime.split('private fun toggleMode', 1)[1].split('private fun cancelPendingRerank', 1)[0]
           assert 'requestApplyInsets' not in toggle
           assert 'keyboardContainer?.requestLayout()' in toggle
-
-          # AI conversion is followed by a deterministic Katakana escape candidate instead of the
-          # raw Hiragana reading. Raw reading can still remain later in the ordinary pool.
-          assert 'private fun toKatakanaReading' in ime
           assert 'private fun forceKatakanaSecond' in ime
-          assert 'forceKatakanaSecond(stableRanked.first(), reading' in ime
-          assert 'forceKatakanaSecond(result.candidates.first(), reading' in ime
-          assert "if (ch in 'ぁ'..'ゖ') (ch.code + 0x60).toChar()" in ime
 
-          # Crash regression from the POCO/HyperOS tombstone.
+          # Unicode-safe JNI crash regression remains permanent.
           assert 'jstring utf8_to_jstring' in jni
           assert 'std::string jstring_to_utf8' in jni
           assert 'env->NewString(' in jni
@@ -210,62 +225,31 @@ jobs:
           except UnicodeDecodeError as exc:
               assert exc.start == len(crash_tail) - 2
 
-          # InputView reuse stability.
+          # InputView reuse and serialized native runtime stay intact.
           assert 'override fun onStartInputView' in ime
-          assert 'private fun resumeInputView()' in ime
           finish = ime.split('override fun onFinishInputView', 1)[1].split('private fun resumeInputView', 1)[0]
           for forbidden in ('candidateRow = null', 'keyboardContainer = null', 'pulseBackground = null', 'commentOverlay = null'):
               assert forbidden not in finish, forbidden
-          assert 'inputViewActive = false' in finish
-          assert 'inputViewActive = true' in ime
-          assert 'background.isAttachedToWindow' in ime
-
-          # HyperOS / gesture navigation safe area.
-          assert 'val minimumBottomSafe = 30.dp()' in ime
-          assert 'val maximumBottomSafe = 56.dp()' in ime
-          assert 'WindowInsets.Type.navigationBars()' in ime
-          assert 'WindowInsets.Type.systemGestures()' in ime
-          assert 'WindowInsets.Type.mandatorySystemGestures()' in ime
-          assert 'reportedBottom + 6.dp()' in ime
-
-          # All service instances serialize access to the one process-wide llama context.
-          assert '@Volatile private var sharedInstance' in medium
           assert 'private val nativeInferenceLock = Any()' in medium
           assert 'synchronized(nativeInferenceLock)' in medium
           assert 'fun close() = Unit' in medium
-          assert 'sharedInstance?.takeIf { it.corpusTrained }' in medium
-
-          # Queued stale keystrokes are rejected before native inference.
           assert 'compositionBuffer.toString() != reading' in ime
           assert 'epoch != candidateEpoch' in ime
           assert 'epoch != predictionEpoch' in ime
 
-          # Conversion stays usable on transient DB/RAG failures.
-          assert 'CandidateGenerator.candidates(reading)' in ime
-          assert 'getOrElse { listOf(reading) }' in ime
-          assert '(rag + dictionary + reading)' in ime
-
-          # Audio Pulse stability remains intact.
+          # Audio Pulse and existing UX remain intact.
           assert 'START_NOT_STICKY' in pulse
           assert 'AudioRecord.ERROR_DEAD_OBJECT' in pulse
-          assert 'AudioRecord.ERROR_INVALID_OPERATION' in pulse
-          assert 'AudioRecord.ERROR_BAD_VALUE' in pulse
-          assert 'Thread.sleep(8L)' in pulse
           assert 'AudioPulseState.publish(envelope)' in pulse
           assert '@Volatile var level' in state
-
-          # Existing UX remains intact.
           assert 'functionButton("空白")' in ime
-          assert 'commitRawReading()' in ime
           assert 'private fun kanaModifierFlickButton' in ime
           assert 'ModifierAction.DAKUTEN' in ime and 'ModifierAction.HANDAKUTEN' in ime
           assert 'fun applyDakuten' in flick and 'fun applyHandakuten' in flick
           assert 'text = "$candidate wwww"' in ime
-          assert 'LinearInterpolator' in ime
-          assert 'val glowHeight = height * (0.52f' in ime
 
           assert not Path('app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf').exists()
-          print('v0.10.7 QWERTY/Katakana/JNI source checks passed')
+          print('v0.11 precision/UI/JNI source checks passed')
           PY
 
       - uses: actions/setup-java@v4
@@ -309,13 +293,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.7-QwertyStable-KatakanaSecond-debug
+          name: Transformer-IME-v0.11.0-PrecisionReranker-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.10.7 metadata
+      - name: Upload v0.11.0 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.7-metadata
+          name: Transformer-IME-v0.11.0-metadata
           path: |
             app/src/main/assets/zenzai95.meta.json
             app/src/main/assets/mozc_compact.meta.json

@@ -4,14 +4,16 @@ import android.content.Context
 import com.ikegami.transformerime.conversion.CandidateGenerator
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.ln
 import kotlin.math.max
 
 /**
- * v0.9.1 single-model Zenzai runtime.
+ * Zenzai v3.2 runtime.
  *
- * zenz-v3.2-small (~95.1M) is decoded through exactly ten first-token branches for both
- * conversion and post-commit prediction. Only the best AI conversion is shown; the raw reading
- * is always kept immediately to its right by the IME layer.
+ * v0.11 keeps the ten-way neural expansion, but no longer trusts a free-generated string as the
+ * winner by default. Mozc / Personal-RAG drafts and neural expansions are pooled, then the native
+ * model scores each surface as P(surface | left context, reading). The final order fuses that
+ * conditional likelihood with the already-personalized draft order.
  */
 class Zenzai190MEngine(private val context: Context) {
     data class Generation(
@@ -23,6 +25,11 @@ class Zenzai190MEngine(private val context: Context) {
 
     private data class GenerationBatch(
         val items: List<Generation>,
+        val latencyMs: Long
+    )
+
+    private data class ScoreBatch(
+        val scores: List<Float>,
         val latencyMs: Long
     )
 
@@ -59,9 +66,9 @@ class Zenzai190MEngine(private val context: Context) {
     }
 
     /**
-     * Generate ten alternatives internally, but expose only one AI recommendation at the front.
-     * The remaining neural hypotheses are appended after the normal drafts so they remain available
-     * without cluttering the visible AI area.
+     * Ten-way expansion supplies diverse neural hypotheses, but a constrained scorer decides the
+     * final winner from a pool dominated by Mozc/RAG drafts. This greatly reduces hallucinated
+     * first candidates while preserving the model's ability to surface a novel spelling.
      */
     fun rerankConversion(
         leftContext: String,
@@ -69,42 +76,49 @@ class Zenzai190MEngine(private val context: Context) {
         drafts: List<String>
     ): RankResult {
         if (!primaryReady || reading.isBlank()) return RankResult(drafts, 0, false, "", 0f)
+
+        val cleanDrafts = drafts.filter { it.isNotBlank() }.distinct()
+        if (cleanDrafts.isEmpty()) return RankResult(listOf(reading), 0, false, "", 0f)
+
         val prompt = ZenzaiPrompt.conversion(leftContext, reading)
         val maxTokens = (reading.length * 2 + 8).coerceIn(8, 48)
-        val primary = generateCandidates(0, prompt, maxTokens, INFERENCE_TRIALS)
-        val neural = primary.items
+        val expansion = generateCandidates(0, prompt, maxTokens, INFERENCE_TRIALS)
+        val neural = expansion.items
             .map { sanitizeConversion(it.text, reading.length) }
             .filter { it.isNotBlank() }
             .distinct()
-        val margin = primary.items.firstOrNull()?.margin ?: 0f
 
-        val aiCandidate = neural.firstOrNull()
-            ?: drafts.firstOrNull { it.isNotBlank() }
-            ?: reading
+        val pool = buildList {
+            cleanDrafts.take(MAX_DRAFTS_FOR_SCORING).forEach(::add)
+            neural.take(MAX_NOVEL_NEURAL).forEach { if (it !in this) add(it) }
+        }.take(MAX_SCORED_CANDIDATES)
 
-        val ranked = buildList {
-            add(aiCandidate)
-            drafts.forEach { candidate ->
-                if (candidate != aiCandidate) add(candidate)
-            }
-            neural.drop(1).forEach { candidate ->
-                if (candidate != aiCandidate && candidate !in this) add(candidate)
-            }
+        val scored = scoreCandidates(0, prompt, pool)
+        val ranked = if (scored.scores.size == pool.size && scored.scores.any { it.isFinite() }) {
+            fuseConditionalScores(cleanDrafts, neural, pool, scored.scores)
+        } else {
+            constrainedFallback(cleanDrafts, neural, expansion.items.firstOrNull()?.margin ?: 0f)
         }
 
+        val topScores = ranked.take(2).mapNotNull { candidate ->
+            val index = pool.indexOf(candidate)
+            scored.scores.getOrNull(index)?.takeIf { it.isFinite() }
+        }
+        val confidence = if (topScores.size >= 2) topScores[0] - topScores[1]
+        else expansion.items.firstOrNull()?.margin ?: 0f
+
         return RankResult(
-            candidates = ranked,
-            latencyMs = primary.latencyMs,
-            usedFallback = false,
+            candidates = (ranked + cleanDrafts + neural).filter { it.isNotBlank() }.distinct(),
+            latencyMs = expansion.latencyMs + scored.latencyMs,
+            usedFallback = scored.scores.isEmpty(),
             generated = neural.firstOrNull().orEmpty(),
-            confidenceMargin = margin
+            confidenceMargin = confidence
         )
     }
 
     /**
-     * Ten independent first-token branches are expanded as possible next readings, then each is
-     * converted through Mozc. Only one candidate is highlighted as AI by the UI; the rest remain
-     * ordinary prediction alternatives and can still benefit from local user learning.
+     * Next-input prediction still uses ten independent first-token branches because its neural
+     * outputs are readings rather than surface candidates. Each reading is expanded through Mozc.
      */
     fun predictNext(leftContext: String, fallbackPool: List<String>): NextResult {
         if (!primaryReady || leftContext.isBlank()) return NextResult(fallbackPool, 0, false, "")
@@ -161,6 +175,20 @@ class Zenzai190MEngine(private val context: Context) {
         return GenerationBatch(items, latency)
     }
 
+    private fun scoreCandidates(index: Int, prompt: String, candidates: List<String>): ScoreBatch {
+        if (candidates.isEmpty()) return ScoreBatch(emptyList(), 0L)
+        val raw = ZenzaiNative.nativeScoreCandidates(
+            index,
+            prompt,
+            candidates.toTypedArray(),
+            MAX_SCORED_CANDIDATES
+        )
+        if (raw.isEmpty()) return ScoreBatch(emptyList(), 0L)
+        val latency = raw[0].toLongOrNull() ?: 0L
+        val scores = raw.drop(1).take(candidates.size).map { it.toFloatOrNull() ?: Float.NEGATIVE_INFINITY }
+        return ScoreBatch(scores, latency)
+    }
+
     private fun materializeAsset(name: String): File {
         val dir = File(context.filesDir, "zenzai-models").apply { mkdirs() }
         val target = File(dir, name)
@@ -185,7 +213,10 @@ class Zenzai190MEngine(private val context: Context) {
     companion object {
         const val PRIMARY_ASSET = "zenz-v3.2-small-Q5_K_M.gguf"
         const val INFERENCE_TRIALS = 10
-        private const val STRONG_MARGIN = 1.35f
+        const val MAX_SCORED_CANDIDATES = 20
+        private const val MAX_DRAFTS_FOR_SCORING = 16
+        private const val MAX_NOVEL_NEURAL = 4
+        private const val STRONG_MARGIN = 1.80f
         private const val NEXT_MAX_TOKENS = 20
 
         internal fun sanitizeConversion(raw: String, readingLength: Int): String {
@@ -206,7 +237,57 @@ class Zenzai190MEngine(private val context: Context) {
                 .filter { it in 'ぁ'..'ゖ' || it == 'ー' }
         }
 
-        /** Retained for regression tests of the older speculative ranking helper. */
+        /**
+         * Fuses native conditional log-likelihood with the already-personalized Mozc/RAG order.
+         * The prior is deliberately small: it breaks close neural ties but cannot rescue a clearly
+         * implausible dictionary candidate. Novel neural strings pay a penalty unless the language
+         * model scores them materially better than a constrained draft.
+         */
+        internal fun fuseConditionalScores(
+            drafts: List<String>,
+            neural: List<String>,
+            pool: List<String>,
+            conditionalScores: List<Float>
+        ): List<String> {
+            if (pool.isEmpty()) return drafts.distinct()
+            val draftIndex = drafts.withIndex().associate { it.value to it.index }
+            val neuralSet = neural.toHashSet()
+            val anyFinite = conditionalScores.any { it.isFinite() }
+            if (!anyFinite) return (drafts + neural).filter { it.isNotBlank() }.distinct()
+
+            return pool.withIndex()
+                .sortedWith(
+                    compareByDescending<IndexedValue<String>> { indexed ->
+                        val candidate = indexed.value
+                        val neuralScore = conditionalScores.getOrNull(indexed.index)
+                            ?.takeIf { it.isFinite() } ?: -1_000f
+                        val pos = draftIndex[candidate]
+                        val prior = if (pos != null) {
+                            (-0.10 * ln(1.0 + pos.toDouble())).toFloat()
+                        } else {
+                            -0.34f
+                        }
+                        val expansionBonus = if (candidate in neuralSet) 0.06f else 0f
+                        neuralScore + prior + expansionBonus
+                    }.thenBy { indexed -> draftIndex[indexed.value] ?: Int.MAX_VALUE }
+                )
+                .map { it.value }
+                .filter { it.isNotBlank() }
+                .distinct()
+        }
+
+        private fun constrainedFallback(drafts: List<String>, neural: List<String>, margin: Float): List<String> {
+            val primary = neural.firstOrNull()
+            if (primary.isNullOrBlank()) return drafts.distinct()
+            if (primary in drafts) return (listOf(primary) + drafts + neural).distinct()
+            return if (margin >= STRONG_MARGIN) {
+                (listOf(primary) + drafts + neural).filter { it.isNotBlank() }.distinct()
+            } else {
+                (drafts + neural).filter { it.isNotBlank() }.distinct()
+            }
+        }
+
+        /** Retained for regression tests of the older speculative helper. */
         internal fun mergeSpeculativeDrafts(
             drafts: List<String>,
             primary: String,
@@ -278,6 +359,7 @@ internal object ZenzaiNative {
     external fun nativeLoadModel(index: Int, path: String): Long
     external fun nativeGenerate(index: Int, prompt: String, maxTokens: Int): Array<String>
     external fun nativeGenerateCandidates(index: Int, prompt: String, maxTokens: Int, branches: Int): Array<String>
+    external fun nativeScoreCandidates(index: Int, prompt: String, candidates: Array<String>, limit: Int): Array<String>
     external fun nativeParameterCount(index: Int): Long
     external fun nativeFree()
 }

@@ -61,8 +61,6 @@ class MediumMoETransformer private constructor(
 
         @Synchronized
         fun load(context: Context): MediumMoETransformer {
-            // A healthy native instance is permanent for the process. A fallback instance is not:
-            // initialization may have failed transiently while assets were being materialized.
             sharedInstance?.takeIf { it.corpusTrained }?.let { return it }
 
             val engine = Zenzai190MEngine(context.applicationContext)
@@ -72,7 +70,7 @@ class MediumMoETransformer private constructor(
                 MediumMoETransformer(
                     engine = engine,
                     corpusTrained = true,
-                    sourceLabel = "Zenzai zenz-v3.2 · 95.1M · Q5_K_M · 10-way decoding",
+                    sourceLabel = "Zenzai v3.2 · 95.1M · Q5_K_M · 10-way + constrained likelihood scorer",
                     parameterCount = params.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
                 )
             } else {
