@@ -38,7 +38,7 @@ class MainActivity : Activity() {
 
         root.addView(TextView(this).apply { text = "Transformer IME"; textSize = 30f })
         root.addView(TextView(this).apply {
-            text = "v0.10.6 · Zenzai 95M ×10 + Unicode-safe JNI"
+            text = "v0.10.7 · QWERTY stability + Katakana second"
             textSize = 14f
             setPadding(0, 8.dp(), 0, 22.dp())
         })
@@ -75,7 +75,7 @@ class MainActivity : Activity() {
         root.addView(audioSwitch, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 64.dp()))
 
         root.addView(TextView(this).apply {
-            text = "Audio Pulseはシステム再生音のRMSと瞬間ピークだけを解析します。今回確認されたクラッシュはAudio PulseではなくZenzai JNIの文字列変換が原因でした。v0.10.6ではllama.cppのUTF-8を安全にUTF-16へ変換し、不完全なマルチバイト末尾でもAndroidがabortしないよう修正しています。"
+            text = "v0.10.7ではQWERTYと日本語フリックの行高を統一し、モード切替時の不要なInset再適用を削減しました。AI変換候補の右隣は、ひらがな原文ではなくカタカナ表記を固定表示します。v0.10.6のUnicode-safe JNI安定化はそのまま維持しています。"
             textSize = 13f
             setPadding(0, 0, 0, 16.dp())
         })
@@ -97,13 +97,13 @@ class MainActivity : Activity() {
         }, fullButton(8))
 
         root.addView(TextView(this).apply {
-            text = "v0.10.6 構成\n" +
+            text = "v0.10.7 構成\n" +
                 "・Zenzai v3.2-small Q5_K_M 約95.1M / 10試行\n" +
-                "・JNIのNewStringUTF / GetStringUTFChars依存を廃止\n" +
-                "・llama.cpp標準UTF-8 → Java UTF-16を安全変換\n" +
-                "・生成上限で途中切れしたUTF-8末尾は安全に破棄\n" +
-                "・絵文字など補助平面文字を含む文脈も標準UTF-8へ正規変換\n" +
-                "・Zenzai runtime共有 + native推論直列化 / stale推論破棄を維持\n" +
+                "・AI第1候補 → カタカナ → 通常候補\n" +
+                "・QWERTY / 日本語フリックを4行×60dpへ統一\n" +
+                "・QWERTY切替時の不要なrequestApplyInsetsを削除\n" +
+                "・bottom insetが変化した時だけレイアウト更新\n" +
+                "・Unicode-safe JNI / native推論直列化 / stale推論破棄を維持\n" +
                 "・InputView再利用 / 候補フォールバック / Audio Pulse安定化を維持\n" +
                 "・日本語Enter / 空白キー / 濁点フリック / ニコニコ風コメントを維持"
             textSize = 14f
