@@ -470,7 +470,11 @@ class TransformerImeService : InputMethodService() {
                     currentCandidates = result.candidates
                     val modelTag = if (medium.corpusTrained) "✦Z190" else "✦Tiny"
                     val dictionaryTag = if (CandidateGenerator.extendedDictionaryReady) "·D" else ""
-                    showCandidates(result.candidates, "$modelTag$dictionaryTag ${result.latencyMs}ms") { commitCandidate(it) }
+                    showCandidates(
+                        result.candidates,
+                        "$modelTag$dictionaryTag ${result.latencyMs}ms",
+                        aiCount = if (medium.corpusTrained) 3 else 1
+                    ) { commitCandidate(it) }
                 }
             }
         }
@@ -602,7 +606,11 @@ class TransformerImeService : InputMethodService() {
                     if (textBeforeCursor().takeLast(160) != contextTail) return@post
                     currentCandidates = result.candidates
                     val modelTag = if (medium.corpusTrained) "✦次Z190" else "✦次Tiny"
-                    showCandidates(result.candidates.take(8), "$modelTag ${result.latencyMs}ms") { commitPrediction(it) }
+                    showCandidates(
+                        result.candidates.take(8),
+                        "$modelTag ${result.latencyMs}ms",
+                        aiCount = if (medium.corpusTrained) 3 else 1
+                    ) { commitPrediction(it) }
                 }
             }
         }
@@ -616,18 +624,29 @@ class TransformerImeService : InputMethodService() {
         postNextPredictions()
     }
 
-    private fun showCandidates(candidates: List<String>, aiBadge: String?, onClick: (String) -> Unit) {
+    private fun showCandidates(
+        candidates: List<String>,
+        aiBadge: String?,
+        aiCount: Int = if (aiBadge != null) 1 else 0,
+        onClick: (String) -> Unit
+    ) {
         val row = candidateRow ?: return
         row.removeAllViews()
         candidates.forEachIndexed { index, candidate ->
-            val aiFirst = index == 0 && aiBadge != null
+            val aiHighlighted = aiBadge != null && index < aiCount
+            val label = when {
+                !aiHighlighted -> candidate
+                aiCount <= 1 -> "$candidate  $aiBadge"
+                index == 0 -> "$candidate  ✦AI1  $aiBadge"
+                else -> "$candidate  ✦AI${index + 1}"
+            }
             row.addView(TextView(this).apply {
-                text = if (aiFirst) "$candidate  $aiBadge" else candidate
+                text = label
                 textSize = 16f
                 gravity = Gravity.CENTER
                 setTextColor(Color.rgb(235, 235, 235))
                 setPadding(16.dp(), 0, 16.dp(), 0)
-                setBackgroundColor(if (aiFirst) Color.rgb(56, 56, 56) else Color.TRANSPARENT)
+                setBackgroundColor(if (aiHighlighted) Color.rgb(56, 56, 56) else Color.TRANSPARENT)
                 setOnClickListener { onClick(candidate) }
             }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, 42.dp()))
 
