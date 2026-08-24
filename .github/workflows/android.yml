@@ -114,8 +114,8 @@ jobs:
           assert path.read_bytes()[:4] == b'GGUF'
           assert path.stat().st_size > 65_000_000
           result = {
-              'version': '0.10.1',
-              'design': 'single Zenzai v3.2; exactly 10-way conversion and 10-way next prediction; one visible AI candidate + raw reading second; local user learning; 4x4 number pad; keyboard-only reactive Audio Pulse',
+              'version': '0.10.2',
+              'design': 'single Zenzai v3.2; 10-way conversion and next prediction; one visible AI candidate + raw reading second; Personal RAG; 4x4 number pad; 320dp bottom-glow Audio Pulse with transparent keys and silence gate',
               'estimated_total_parameters': 95_100_000,
               'quantization': 'Q5_K_M',
               'inference_trials': 10,
@@ -161,10 +161,11 @@ jobs:
           test "$status" -eq 0
           grep -q '新宿' /tmp/zenz_out.txt
 
-      - name: Verify v0.10.1 architecture
+      - name: Verify v0.10.2 architecture
         run: |
           IME=app/src/main/java/com/ikegami/transformerime/ime/TransformerImeService.kt
           PULSE=app/src/main/java/com/ikegami/transformerime/audio/AudioPulseService.kt
+          grep -q "versionName '0.10.2'" app/build.gradle
           grep -q 'INFERENCE_TRIALS = 10' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
           grep -q 'generateCandidates(0, prompt, maxTokens, INFERENCE_TRIALS)' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
           grep -q 'generateCandidates(0, prompt, NEXT_MAX_TOKENS, INFERENCE_TRIALS)' app/src/main/java/com/ikegami/transformerime/model/Zenzai190MEngine.kt
@@ -175,17 +176,20 @@ jobs:
           grep -q 'UserLearningStore' "$IME"
           grep -q 'private fun renderNumberPanel' "$IME"
           grep -q 'listOf("1", "2", "3", "⌫")' "$IME"
-          grep -q 'private fun numberMenuButton(): Button = functionButton("123")' "$IME"
           ! grep -q 'showNumberFan' "$IME"
           ! grep -q 'PopupWindow' "$IME"
-          grep -q 'val keyboardHost = FrameLayout' "$IME"
-          grep -q 'LinearGradient' "$IME"
-          grep -q 'val low = Color.rgb(0, 132, 190)' "$IME"
-          grep -q 'val high = Color.rgb(255, 34, 126)' "$IME"
-          grep -q 'val peak = Color.rgb(255, 116, 34)' "$IME"
-          grep -q 'samplePeak' "$PULSE"
-          grep -q 'rmsLevel' "$PULSE"
-          grep -q 'peakLevel' "$PULSE"
+          grep -q '320.dp()' "$IME"
+          grep -q 'private val KEY_BLACK = Color.TRANSPARENT' "$IME"
+          grep -q 'val glowHeight = height \*' "$IME"
+          grep -q 'height \* 1.04f' "$IME"
+          grep -q 'if (energy <= 0f) return' "$IME"
+          grep -q 'Color.TRANSPARENT' "$IME"
+          grep -q 'val cyan = Color.rgb(0, 178, 255)' "$IME"
+          grep -q 'val orange = Color.rgb(255, 112, 36)' "$IME"
+          grep -q 'log10' "$PULSE"
+          grep -q 'val rmsDb =' "$PULSE"
+          grep -q 'mixed < 0.035f' "$PULSE"
+          grep -q 'envelope < 0.012f' "$PULSE"
           test ! -f app/src/main/assets/zenz-v3.1-small-Q5_K_M.gguf
 
       - uses: actions/setup-java@v4
@@ -229,13 +233,13 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.1-Zenzai95M-x10-Pulse-debug
+          name: Transformer-IME-v0.10.2-Zenzai95M-x10-BottomGlow-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload v0.10.1 metadata
+      - name: Upload v0.10.2 metadata
         uses: actions/upload-artifact@v4
         with:
-          name: Transformer-IME-v0.10.1-metadata
+          name: Transformer-IME-v0.10.2-metadata
           path: |
             app/src/main/assets/zenzai95.meta.json
             app/src/main/assets/mozc_compact.meta.json

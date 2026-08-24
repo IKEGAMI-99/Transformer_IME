@@ -19,6 +19,7 @@ import android.os.IBinder
 import android.os.Looper
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.log10
 import kotlin.math.sqrt
 
 /** Captures capturable system playback and publishes only a normalized 0..1 pulse level. */
@@ -127,15 +128,25 @@ class AudioPulseService : Service() {
                 }
 
                 val rms = sqrt(sum / read).toFloat()
-                val rmsLevel = (rms * 10.5f).coerceIn(0f, 1f)
-                val peakLevel = (samplePeak.toFloat() * 2.45f).coerceIn(0f, 1f)
-                val reactive = (rmsLevel * 0.68f + peakLevel * 0.32f).coerceIn(0f, 1f)
+
+                // v0.10.2: use a dB-based scale instead of multiplying RMS until it saturates.
+                // This preserves more dynamic range, keeps silence truly dark and reserves the
+                // orange end of the palette for genuinely loud material.
+                val rmsDb = (20.0 * log10(rms.coerceAtLeast(0.00001f).toDouble())).toFloat()
+                val rmsLevel = ((rmsDb + 52f) / 44f).coerceIn(0f, 1f)
+                val peakLevel = ((samplePeak.toFloat() - 0.025f) / 0.725f).coerceIn(0f, 1f)
+                val mixed = (rmsLevel * 0.76f + peakLevel * 0.24f).coerceIn(0f, 1f)
+                val reactive = if (mixed < 0.035f) 0f
+                else ((mixed - 0.035f) / 0.965f).coerceIn(0f, 1f)
 
                 envelope = if (reactive > envelope) {
-                    envelope * 0.18f + reactive * 0.82f
+                    // Very fast attack so kicks/transients feel like a heartbeat.
+                    envelope * 0.12f + reactive * 0.88f
                 } else {
-                    envelope * 0.76f + reactive * 0.24f
+                    // Slower release gives a visible glow tail without smearing the next beat.
+                    envelope * 0.82f + reactive * 0.18f
                 }
+                if (reactive == 0f && envelope < 0.012f) envelope = 0f
 
                 prefs().edit().putFloat(KEY_LEVEL, envelope).apply()
             }
